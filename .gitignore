@@ -1,0 +1,92 @@
+# Django-specific
+*.log
+*.pot
+*.pyc
+__pycache__/
+*.pyo
+*.pyd
+.Python
+db.sqlite3  # Exclude default SQLite database (remove this if you want to track it)
+*.sqlite3   # Exclude all SQLite databases
+media/      # Exclude user-uploaded media files (adjust if you want to track them)
+staticfiles/ # Exclude collected static files
+.DS_Store
+# Virtual Environment
+venv/
+env/
+ENV/
+.venv/
+env.bak/
+venv.bak/
+
+# Python
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+parts/
+var/
+sdist/
+develop-eggs/
+.installed.cfg
+pip-log.txt
+pip-delete-this-directory.txt
+.tox/
+.coverage
+coverage.xml
+*,cover
+htmlcov/
+.pytest_cache/
+*.mo
+*.py,cover
+
+# IDEs and Editors
+.idea/          # PyCharm
+*.sublime-*     # Sublime Text
+.vscode/        # Visual Studio Code
+*.swp           # Vim swap files
+*.swo
+
+# OS generated files
+.DS_Store       # macOS
+Thumbs.db       # Windows
+
+# Environment variables
+.env            # Common convention for environment variable files
+.local.env
+*.env.local
+*.env.*.local
+
+# Testing and Development
+migrations/     # Exclude migrations (optional, remove if you want to track them)
+*.bak
+*.cache
+*.log.*
+local_settings.py  # Local settings override file
+
+# Docker
+docker-compose.override.yml
+docker-compose.override.yml.local
+docker-compose.override.yml.production
+docker-compose.override.yml.staging
+
+# Local
+local_settings.py
+local_settings.py.local
+
+# Local settings
+local_settings.py
+local_settings.py.local
+pipfile
+pipfile.lock
+static/
+media/
+debug.log
+logs/
+general.log
+*.log
+pytest.ini
+.pytest_cache
+.env.local
+.env
