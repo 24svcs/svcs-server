@@ -2,7 +2,7 @@ from django.urls import path, include
 from rest_framework_nested import routers
 from core.views import LanguageViewSet
 from organization.views import OrganizationViewSet, MemberViewSet, MemberInvitationViewSet
-
+from human_resources.views import DepartmentModelViewset, PositionModelViewset, EmployeeModelViewset, AttendanceModelViewset, AttendanceReportView
 router = routers.DefaultRouter()
 router.register('languages', LanguageViewSet, basename='languages')
 router.register(r'organizations', OrganizationViewSet, basename='organizations')
@@ -12,9 +12,32 @@ member_router.register(r'members', MemberViewSet, basename='member')
 invitation_router = routers.NestedDefaultRouter(router, r'organizations', lookup='organization')
 invitation_router.register(r'invitations', MemberInvitationViewSet, basename='invitation')
 
+department_router = routers.NestedDefaultRouter(router, r'organizations', lookup='organization')
+department_router.register(r'departments', DepartmentModelViewset, basename='department')
+
+
+position_router = routers.NestedDefaultRouter(router, r'organizations', lookup='organization')
+position_router.register(r'positions', PositionModelViewset, basename='position')
+
+
+employee_router = routers.NestedDefaultRouter(router, r'organizations', lookup='organization')
+employee_router.register(r'employees', EmployeeModelViewset, basename='employee')
+
+
+attendance_router = routers.NestedDefaultRouter(router, r'organizations', lookup='organization')
+attendance_router.register(r'attendances', AttendanceModelViewset, basename='attendance')
+
+
+
+
 
 urlpatterns = [
      path(r'', include(router.urls)),
      path(r'', include(member_router.urls)),
      path(r'', include(invitation_router.urls)),
+     path(r'', include(department_router.urls)),
+     path(r'', include(position_router.urls)),
+     path(r'', include(employee_router.urls)),
+     path(r'', include(attendance_router.urls)),
+     path('organizations/<str:organization_pk>/attendance-report/', AttendanceReportView.as_view(), name='organization-attendance-report'),
 ]
