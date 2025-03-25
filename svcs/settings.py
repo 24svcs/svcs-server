@@ -119,7 +119,7 @@ ALLOWED_HOSTS = [
     '.vercel.app',
     'localhost:8000',
     '127.0.0.1',
-    '24svcs-server.up.railway.app/'
+    '24svcs-server.up.railway.app'
 ]
 
 CSRF_TRUSTED_ORGINS = ['https://24svcs-server.up.railway.app/']
