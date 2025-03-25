@@ -193,6 +193,25 @@ class OrganizationViewSet(TimezoneMixin, viewsets.ModelViewSet):
         
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
+    @action(detail=False, methods=['GET'], url_path='owner')
+    def owner(self, request, pk=None):
+        """
+        Returns the organization where the current user is the owner.
+        """
+        user_id = self.request.user.id
+        
+        organization = Organization.objects.filter(
+            members__user_id=user_id,
+            members__is_owner=True,
+            members__status=Member.ACTIVE,
+        ).first()
+        
+        if not organization:
+            return Response({'detail': 'You are not an owner of any organization'}, status=status.HTTP_404_NOT_FOUND)
+        
+        serializer = self.get_serializer(organization)
+        return Response(serializer.data)
+
 
 class MemberViewSet(
     viewsets.GenericViewSet,
