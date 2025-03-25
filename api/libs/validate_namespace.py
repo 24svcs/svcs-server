@@ -3,7 +3,7 @@ from rest_framework import serializers
 from django.utils.translation import gettext_lazy as _
 import re
 
-def validate_organization_name_space(value, instance=None):
+def validate_organization_namespace(value, instance=None):
     """
     Validates a organization name space that will be used in URLs (e.g., domain.com/organization-name-space).
     

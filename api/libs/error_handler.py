@@ -9,7 +9,7 @@ def custom_error_handler(exc, context):
         if isinstance(exc.detail, dict):
             # Construct a single error message like "email field is required."
             field, messages = next(iter(exc.detail.items()))
-            error_message = f"({field})field {messages[0].lower()}" if messages else "Validation error"
+            error_message = f"({field}) field error -  {messages[0].lower()}" if messages else "Validation error"
             response.data = {"error": error_message}
         else:
             # For non-field errors, return a general error message

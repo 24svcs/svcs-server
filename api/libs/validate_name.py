@@ -53,7 +53,7 @@ def validate_organization_name(value, instance=None):
         raise serializers.ValidationError(_('Name cannot contain consecutive spaces.'))
     
     # Check for consecutive punctuation
-    if re.search(r'[\.\&\-\'\,\(\)]+{2,}', value):
+    if re.search(r'[\.\&\-\'\,\(\)]{2,}', value):
         raise serializers.ValidationError(_('Name cannot contain consecutive or non-standard punctuation characters.'))
     
     # Check for leading/trailing punctuation

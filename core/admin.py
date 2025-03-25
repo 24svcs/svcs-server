@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import User, Permission
+from .models import User, Permission, Language
 
 @admin.register(User)
 class UserAdmin(admin.ModelAdmin):
@@ -15,3 +15,6 @@ class PermissionAdmin(admin.ModelAdmin):
     search_fields = ('id', 'name')
     
     
+@admin.register(Language)
+class LanguageAdmin(admin.ModelAdmin):
+    list_display = ['id', 'code', 'name']
