@@ -12,7 +12,6 @@ SECRET_KEY = 'django-insecure-lb%$j3t6+@e%#@h@97_!t0y__g82l68-zg5=^h#-_y#ks92971
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = []
 
 
 # Application definition
@@ -118,4 +117,5 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 AUTH_USER_MODEL = 'core.User'
 
 
-ALLOWED_HOSTS = ['127.0.0.1', '.vercel.app']
+ALLOWED_HOSTS = ['.vercel.app', '.railway.app', 'localhost:8000', '127.0.0.1']
+CSRF_TRUSTED_ORGINS = ['*']
