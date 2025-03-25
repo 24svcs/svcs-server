@@ -300,16 +300,14 @@ class EmployeeWithDetailsSerializer(EmployeeSerializer):
 
 
 class CreateEmployeeSerializer(serializers.ModelSerializer):
-    phone_number = PhoneNumberField(validators=[validate_phone.validate_phone])
     id = serializers.UUIDField(read_only=True)
-    
-    # Employment details fields
+    phone_number = PhoneNumberField(validators=[validate_phone.validate_phone])
     position_id = serializers.IntegerField(write_only=True)
     hire_date = serializers.DateField(write_only=True)
     employment_status = serializers.ChoiceField(choices=EmploymentDetails.EMPLOYMENT_STATUS, default='FT', write_only=True)
-    salary = serializers.DecimalField(max_digits=10, decimal_places=2, allow_null=True, required=False, write_only=True)
-    shift_start = serializers.TimeField(required=False, allow_null=True, write_only=True)
-    shift_end = serializers.TimeField(required=False, allow_null=True, write_only=True)
+    salary = serializers.DecimalField(max_digits=10, decimal_places=2, required=True, write_only=True)
+    shift_start = serializers.TimeField(required=True, write_only=True)
+    shift_end = serializers.TimeField(required=True, write_only=True)
     days_off = serializers.JSONField(required=False, allow_null=True, write_only=True)
     annual_leave_days = serializers.IntegerField(default=0, required=False, write_only=True)
     sick_leave_days = serializers.IntegerField(default=0, required=False, write_only=True)
@@ -327,7 +325,7 @@ class CreateEmployeeSerializer(serializers.ModelSerializer):
   
     def validate_position_id(self, value):
         organization_id = self.context['organization_id']
-        # Check if the position belongs to a department in the current company
+        # Check if the position belongs to a department in the current organization
         if not Position.objects.select_related('department').filter(
             id=value,
             department__organization_id=organization_id
@@ -377,20 +375,31 @@ class CreateEmployeeSerializer(serializers.ModelSerializer):
     
     def validate(self, data):
         # Validate shift times if both are provided
-        if data.get('shift_start') and data.get('shift_end'):
-            if data['shift_start'] >= data['shift_end']:
-                raise serializers.ValidationError(_("Shift end time must be after shift start time."))
+        shift_start = data.get('shift_start') 
+        shift_end = data.get('shift_end')
+        
+        # If one is provided but not the other, get the existing value from instance
+        if shift_start and not shift_end and self.instance:
+            shift_end = self.instance.shift_end
+        elif shift_end and not shift_start and self.instance:
+            shift_start = self.instance.shift_start
+        
+        if shift_start and shift_end and shift_start >= shift_end:
+            raise serializers.ValidationError(_("Shift end time must be after shift start time."))
         
         # Validate salary against position salary range
-        if data.get('salary') is not None and data.get('position_id'):
+        salary = data.get('salary')
+        position_id = data.get('position_id')
+        
+        if salary is not None and position_id:
             try:
-                position = Position.objects.get(id=data['position_id'])
+                position = Position.objects.get(id=position_id)
                 
                 # Check if position has defined salary ranges
-                if position.salary_range_min is not None and data['salary'] < position.salary_range_min:
+                if position.salary_range_min is not None and salary < position.salary_range_min:
                     raise serializers.ValidationError(_("Salary cannot be lower than the position's minimum salary range."))
                 
-                if position.salary_range_max is not None and data['salary'] > position.salary_range_max:
+                if position.salary_range_max is not None and salary > position.salary_range_max:
                     raise serializers.ValidationError(_("Salary cannot be higher than the position's maximum salary range."))
                     
             except Position.DoesNotExist:
@@ -511,20 +520,31 @@ class UpdateEmploymentDetailsSerializer(serializers.ModelSerializer):
     
     def validate(self, data):
         # Validate shift times if both are provided
-        if data.get('shift_start') and data.get('shift_end'):
-            if data['shift_start'] >= data['shift_end']:
-                raise serializers.ValidationError(_("Shift end time must be after shift start time."))
+        shift_start = data.get('shift_start') 
+        shift_end = data.get('shift_end')
+        
+        # If one is provided but not the other, get the existing value from instance
+        if shift_start and not shift_end and self.instance:
+            shift_end = self.instance.shift_end
+        elif shift_end and not shift_start and self.instance:
+            shift_start = self.instance.shift_start
+        
+        if shift_start and shift_end and shift_start >= shift_end:
+            raise serializers.ValidationError(_("Shift end time must be after shift start time."))
         
         # Validate salary against position salary range
-        if data.get('salary') is not None and data.get('position_id'):
+        salary = data.get('salary')
+        position_id = data.get('position_id')
+        
+        if salary is not None and position_id:
             try:
-                position = Position.objects.get(id=data['position_id'])
+                position = Position.objects.get(id=position_id)
                 
                 # Check if position has defined salary ranges
-                if position.salary_range_min is not None and data['salary'] < position.salary_range_min:
+                if position.salary_range_min is not None and salary < position.salary_range_min:
                     raise serializers.ValidationError(_("Salary cannot be lower than the position's minimum salary range."))
                 
-                if position.salary_range_max is not None and data['salary'] > position.salary_range_max:
+                if position.salary_range_max is not None and salary > position.salary_range_max:
                     raise serializers.ValidationError(_("Salary cannot be higher than the position's maximum salary range."))
                     
             except Position.DoesNotExist:
@@ -571,7 +591,7 @@ class CheckInOutSerializer(serializers.Serializer):
         try:
             Employee.objects.get(id=value, organization_id=organization_id)
         except Employee.DoesNotExist:
-            raise serializers.ValidationError(_("Employee not found in this organization."))
+            raise serializers.ValidationError(_("Invalid employee ID."))
         
         return value
     
@@ -619,9 +639,21 @@ class CheckInOutSerializer(serializers.Serializer):
         """
         employee = Employee.objects.get(id=employee_id)
         
-        # Get employment details to determine status
+        # Get employment details to determine status and validate check-in time
         try:
             employment_details = EmploymentDetails.objects.get(employee_id=employee_id)
+            
+            # Prevent check-in if shift period is not defined
+            if employment_details.shift_start is None or employment_details.shift_end is None:
+                raise serializers.ValidationError(_(
+                    "You cannot check in because your shift period is not defined. Please contact an administrator."
+                ))
+            
+            # Prevent check-in after shift end time
+            if current_time > employment_details.shift_end:
+                raise serializers.ValidationError(_(
+                    "You cannot check in after your scheduled shift end time. Please contact an administrator."
+                ))
             
             # Determine status based on shift start time
             status = Attendance.ATTENDANCE_ON_TIME
@@ -643,8 +675,10 @@ class CheckInOutSerializer(serializers.Serializer):
                     status = Attendance.ATTENDANCE_LATE
                 
         except EmploymentDetails.DoesNotExist:
-            # If no employment details, default to present
-            status = Attendance.ATTENDANCE_ON_TIME
+            # If no employment details exist, employee cannot check in
+            raise serializers.ValidationError(_(
+                "You cannot check in because you don't have employment details recorded. Please contact an administrator."
+            ))
         
         # Create new attendance record
         attendance = Attendance.objects.create(

@@ -91,3 +91,5 @@ pytest.ini
 .env.local
 .env
 dev.py
+
+notes.md
