@@ -90,3 +90,4 @@ pytest.ini
 .pytest_cache
 .env.local
 .env
+dev.py

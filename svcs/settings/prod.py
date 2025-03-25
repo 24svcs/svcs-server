@@ -1,0 +1,57 @@
+from .common import *
+
+from urllib.parse import urlparse
+from decouple import config
+import os
+
+
+TIME_ZONE = 'UTC'
+
+SECRET_KEY = config('SECRET_KEY')
+
+DEBUG = False
+
+tmpPostgres = urlparse(os.getenv("DATABASE_URL"))
+
+
+DATABASES = {
+    'default': {
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': tmpPostgres.path.replace('/', ''),
+        'USER': tmpPostgres.username,
+        'PASSWORD': tmpPostgres.password,
+        'HOST': tmpPostgres.hostname,
+        'PORT': 5432,
+        'TEST': {
+            'NAME': 'test_neondb_unique'
+        }
+    },
+}
+
+
+ALLOWED_HOSTS = [
+    'localhost:8000',
+    '127.0.0.1',
+    '24svcs-server.up.railway.app',
+    'http://127.0.0.1:8000/'
+]
+
+
+CORS_ALLOW_HEADERS = [
+    'accept',
+    'accept-encoding',
+    'authorization',
+    'content-type',
+    'dnt',
+    'origin',
+    'user-agent',
+    'x-csrftoken',
+    'x-requested-with',
+]
+
+
+CSRF_TRUSTED_ORGINS = ['https://24svcs-server.up.railway.app']
+APPEND_SLASH=False
+SESSION_COOKIE_SECURE = True
+SESSION_COOKIE_HTTPONLY = True
+CSRF_COOKIE_SECURE = True

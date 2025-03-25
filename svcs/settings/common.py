@@ -1,19 +1,9 @@
 
-from urllib.parse import urlparse
 from pathlib import Path
-from decouple import config
 import os
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-
-SECRET_KEY = 'django-insecure-lb%$j3t6+@e%#@h@97_!t0y__g82l68-zg5=^h#-_y#ks92971'
-
-DEBUG = True
-
-
-
-# Application definition
 
 INSTALLED_APPS = [
     'django.contrib.admin',
@@ -56,23 +46,6 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'svcs.wsgi.application'
 
-tmpPostgres = urlparse(os.getenv("DATABASE_URL"))
-
-
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.postgresql',
-        'NAME': tmpPostgres.path.replace('/', ''),
-        'USER': tmpPostgres.username,
-        'PASSWORD': tmpPostgres.password,
-        'HOST': tmpPostgres.hostname,
-        'PORT': 5432,
-        'TEST': {
-            'NAME': 'test_neondb_unique'
-        }
-    },
-
-}
 
 
 
@@ -92,34 +65,17 @@ AUTH_PASSWORD_VALIDATORS = [
 ]
 
 
-# Internationalization
-# https://docs.djangoproject.com/en/5.1/topics/i18n/
 
 LANGUAGE_CODE = 'en-us'
-
-TIME_ZONE = 'UTC'
-
 USE_I18N = True
-
 USE_TZ = True
 
-
-
 STATIC_URL = 'static/'
-STATIC_ROOT = os.path.join(BASE_DIR, 'static')
 MEDIA_URL = '/media/'
+STATIC_ROOT = os.path.join(BASE_DIR, 'static')
 MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
-
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 AUTH_USER_MODEL = 'core.User'
-SECRET_KEY = config('SECRET_KEY')
 
 
-ALLOWED_HOSTS = [
-    '.vercel.app',
-    'localhost:8000',
-    '127.0.0.1',
-    '24svcs-server.up.railway.app'
-]
 
-CSRF_TRUSTED_ORGINS = ['https://24svcs-server.up.railway.app/']
