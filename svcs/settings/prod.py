@@ -9,7 +9,7 @@ TIME_ZONE = 'UTC'
 
 SECRET_KEY = config('SECRET_KEY')
 
-DEBUG = False
+DEBUG = True
 
 tmpPostgres = urlparse(os.getenv("DATABASE_URL"))
 
@@ -36,6 +36,12 @@ ALLOWED_HOSTS = [
     'http://127.0.0.1:8000/'
 ]
 
+INTERNAL_IPS = [
+    "127.0.0.1",
+]
+
+
+
 
 CORS_ALLOW_HEADERS = [
     'accept',
@@ -55,3 +61,40 @@ APPEND_SLASH=False
 SESSION_COOKIE_SECURE = True
 SESSION_COOKIE_HTTPONLY = True
 CSRF_COOKIE_SECURE = True
+
+
+
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'handlers': {
+        'console': {
+            'class': 'logging.StreamHandler',
+            'level': 'WARNING',   
+            'formatter': 'verbose'
+        },
+        'file': {
+            'class': 'logging.FileHandler',
+            'level': 'WARNING',   
+            'formatter': 'verbose',
+            'filename': 'debug.log'
+        },
+    },
+    'loggers': {
+        'django': {
+            'handlers': ['console', 'file'],
+            'level': 'WARNING',   
+            'propagate': True,
+        },
+    },
+    'root': {
+        'handlers': ['console', 'file'],
+        'level': 'WARNING',   
+    },     
+    'formatters': {
+        'verbose': {
+            'format': '{asctime}( {levelname}) - {message}',
+            'style': '{',
+        },
+    },
+}
