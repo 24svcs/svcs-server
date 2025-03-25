@@ -75,6 +75,26 @@ class DepartmentModelViewset(ModelViewSet):
         
         
         serializer.save()
+
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        
+        # Check if there are any employees associated with this department
+        has_employees = Position.objects.filter(
+            department=instance, 
+            id__in=EmploymentDetails.objects.values('position_id')
+        ).exists()
+        
+        if has_employees:
+            return Response(
+                {"detail": _("Cannot delete department because it has employees associated with it. Please reassign these employees to another department first.")},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # If no employees, proceed with deletion
+        self.perform_destroy(instance)
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
 class PositionModelViewset(ModelViewSet):
     pagination_class = DefaultPagination
     filter_backends = [filters.SearchFilter, DjangoFilterBackend]
@@ -93,6 +113,22 @@ class PositionModelViewset(ModelViewSet):
     def get_serializer_context(self):
         return {'organization_id': self.kwargs['organization_pk']}
     
+    
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        
+        # Check if there are any employees associated with this position
+        has_employees = EmploymentDetails.objects.filter(position=instance).exists()
+        
+        if has_employees:
+            return Response(
+                {"detail": _("Cannot delete position because it has employees assigned to it. Please reassign these employees to another position first.")},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # If no employees, proceed with deletion
+        self.perform_destroy(instance)
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class EmployeeModelViewset(TimezoneMixin, ModelViewSet):
@@ -449,3 +485,19 @@ class AttendanceReportView(TimezoneMixin, APIView):
             report['department_statistics'] = department_stats
         
         return Response(report, status=status.HTTP_200_OK)
+
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        
+        # Check if there are any employees associated with this position
+        has_employees = EmploymentDetails.objects.filter(position=instance).exists()
+        
+        if has_employees:
+            return Response(
+                {"detail": _("Cannot delete position because it has employees assigned to it. Please reassign these employees to another position first.")},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # If no employees, proceed with deletion
+        self.perform_destroy(instance)
+        return Response(status=status.HTTP_204_NO_CONTENT)
