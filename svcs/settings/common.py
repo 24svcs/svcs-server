@@ -18,7 +18,8 @@ INSTALLED_APPS = [
     'django_filters',
     'phonenumber_field',
     'api',
-    'organization'
+    'organization',
+    'human_resources'
 ]
 
 MIDDLEWARE = [
