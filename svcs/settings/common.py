@@ -79,6 +79,13 @@ AUTHENTICATION_BACKENDS = (
     'guardian.backends.ObjectPermissionBackend',
 )
 
+REST_FRAMEWORK = {
+    'COERCE_DECIMAL_TO_STRING': False,
+    'EXCEPTION_HANDLER': 'api.libs.error_handler.custom_error_handler',
+    "DEFAULT_AUTHENTICATION_CLASSES": (
+        "core.authentication.ClerkAuthentication",
+    ),
+}
 
 LANGUAGE_CODE = 'en-us'
 USE_I18N = True
