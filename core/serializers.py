@@ -27,4 +27,4 @@ class SimplePermissionSerializer(serializers.ModelSerializer):
 class LanguageSerializer(serializers.ModelSerializer):
     class Meta:
         model = Language
-        fields = ['id','name']
+        fields = ['id','code', 'name']

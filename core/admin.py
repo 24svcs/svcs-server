@@ -11,7 +11,7 @@ class UserAdmin(admin.ModelAdmin):
     
 @admin.register(Permission)
 class PermissionAdmin(admin.ModelAdmin):
-    list_display = ('id', 'name')
+    list_display = ('id' ,'name')
     search_fields = ('id', 'name')
     
     

@@ -54,7 +54,7 @@ class PermissionViewSet(viewsets.ReadOnlyModelViewSet):
 class LanguageViewSet(viewsets.ReadOnlyModelViewSet):
     pagination_class = DefaultPagination
     filter_backends = [filters.SearchFilter, DjangoFilterBackend]
-    search_fields = ['name__istartswith']
+    search_fields = ['code__exact', 'name__istartwith']
     serializer_class = PermissionSerializer
-    queryset = Language.objects.all().order_by('name')
+    queryset = Language.objects.all().order_by('code')
     serializer_class = LanguageSerializer

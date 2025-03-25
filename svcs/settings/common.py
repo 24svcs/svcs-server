@@ -16,7 +16,9 @@ INSTALLED_APPS = [
     'rest_framework',
     'guardian',
     'django_filters',
-    'api'
+    'phonenumber_field',
+    'api',
+    'organization'
 ]
 
 MIDDLEWARE = [

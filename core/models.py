@@ -369,18 +369,25 @@ class Language(models.Model):
         (FRENCH, 'French'),
         (KREYOL, 'Kreyol'),
     ]
-    name = models.CharField(max_length=2, choices=LANGUAGE_CHOICES, unique=True)
     
+    LANGUAGE_MAP = dict(LANGUAGE_CHOICES)
+
+    code = models.CharField(max_length=2, choices=LANGUAGE_CHOICES, unique=True)
+    name = models.CharField(max_length=50, editable=False)
+
+    def save(self, *args, **kwargs):
+        """Automatically set the human-readable name before saving."""
+        self.name = self.LANGUAGE_MAP.get(self.code, "Unknown")
+        super().save(*args, **kwargs)
+
     def __str__(self):
         return self.name
-    
-    
+
     class Meta:
         verbose_name_plural = "Languages"
         indexes = [
             models.Index(fields=['name']),
         ]
-    
     
 
     
