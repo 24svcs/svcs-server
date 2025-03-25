@@ -23,7 +23,14 @@ from core.models import Permission
 from core.pagination import DefaultPagination
 from api.permission import OrganizationPermission
 from organization.filters import OrganizationFilter
-
+from organization.serializers.member import (
+    MemberSerializer,
+    UpdateMemberSerializer,
+    InvitedMemberSerializer,
+    CreateInviteMemberSerializer,
+    UpdateInviteMemberSerializer,
+    MemberInvitation
+)
 
 
 
@@ -187,128 +194,128 @@ class OrganizationViewSet(TimezoneMixin, viewsets.ModelViewSet):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
-# class OrganizationMemberViewSet(
-#     viewsets.GenericViewSet,
-#     mixins.ListModelMixin,
-#     mixins.DestroyModelMixin,
-#     mixins.RetrieveModelMixin,
-#     mixins.UpdateModelMixin
-# ):
-#     """
-#     API endpoint for members with optimized queries.
-#     """
-#     pagination_class = DefaultPagination
-#     filter_backends = [filters.SearchFilter, DjangoFilterBackend]
-#     search_fields = ['user__email', 'user__first_name', 'user__last_name']
+class MemberViewSet(
+    viewsets.GenericViewSet,
+    mixins.ListModelMixin,
+    mixins.DestroyModelMixin,
+    mixins.RetrieveModelMixin,
+    mixins.UpdateModelMixin
+):
+    """
+    API endpoint for members with optimized queries.
+    """
+    pagination_class = DefaultPagination
+    filter_backends = [filters.SearchFilter, DjangoFilterBackend]
+    search_fields = ['user__email', 'user__first_name', 'user__last_name']
     
-#     def get_permissions(self):
-#         if self.action in ['update', 'partial_update']:
-#             return [IsAuthenticated(), OrganizationPermission(Permission.EDIT_ORGANIZATION_MEMBER)]
-#         elif self.action == 'destroy':
-#             return [IsAuthenticated(), OrganizationPermission(Permission.DELETE_ORGANIZATION_MEMBER)]
-#         return [IsAuthenticated()]
+    def get_permissions(self):
+        if self.action in ['update', 'partial_update']:
+            return [IsAuthenticated(), OrganizationPermission(Permission.EDIT_ORGANIZATION_MEMBER)]
+        elif self.action == 'destroy':
+            return [IsAuthenticated(), OrganizationPermission(Permission.DELETE_ORGANIZATION_MEMBER)]
+        return [IsAuthenticated()]
     
     
-#     def get_serializer_class(self):
-#         if self.request.method in ['PATCH', 'PUT']:
-#             return UpdateOrganizationMemberSerializer
-#         return OrganizationMemberSerializer
+    def get_serializer_class(self):
+        if self.request.method in ['PATCH', 'PUT']:
+            return UpdateMemberSerializer
+        return MemberSerializer
     
-#     def get_queryset(self):
-#         # Optimize query with select_related and prefetch_related
-#         return OrganizationMember.objects.filter(
-#             organization_id=self.kwargs['organization_pk']
-#         ).select_related(
-#             'user', 'organization'
-#         ).prefetch_related(
-#             'permissions'
-#         )
+    def get_queryset(self):
+        # Optimize query with select_related and prefetch_related
+        return Member.objects.filter(
+            organization_id=self.kwargs['organization_pk']
+        ).select_related(
+            'user', 'organization'
+        ).prefetch_related(
+            'permissions'
+        )
     
-#     def get_serializer_context(self):
-#         return {'organization_id': self.kwargs['organization_pk']}
+    def get_serializer_context(self):
+        return {'organization_id': self.kwargs['organization_pk']}
     
-#     def get_filterset_kwargs(self):
-#         kwargs = super().get_filterset_kwargs()
-#         kwargs['request'] = self.request
-#         return kwargs
+    def get_filterset_kwargs(self):
+        kwargs = super().get_filterset_kwargs()
+        kwargs['request'] = self.request
+        return kwargs
     
-#     def perform_update(self, serializer):
-#         instance = serializer.instance
+    def perform_update(self, serializer):
+        instance = serializer.instance
         
-#         # Prevent updating owner membership
-#         if instance.is_owner:
-#             from rest_framework.exceptions import ValidationError
-#             raise ValidationError("Owner membership cannot be modified.")
-#         serializer.save()
+        # Prevent updating owner membership
+        if instance.is_owner:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError("Owner membership cannot be modified.")
+        serializer.save()
     
     
-#     def perform_destroy(self, instance):
-#         # Check if the member is the owner
-#         if instance.is_owner:
-#             from rest_framework.exceptions import ValidationError
-#             raise ValidationError("Cannot delete the Organization owner's membership.")
+    def perform_destroy(self, instance):
+        # Check if the member is the owner
+        if instance.is_owner:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError("Cannot delete the Organization owner's membership.")
             
-#         with transaction.atomic():
-#             # Delete associated invitation if it exists
-#             OrganizationMemberInvitation.objects.filter(
-#                 organization=instance.organization,
-#                 email__iexact=instance.user.email
-#             ).delete()
+        with transaction.atomic():
+            # Delete associated invitation if it exists
+            MemberInvitation.objects.filter(
+                organization=instance.organization,
+                email__iexact=instance.user.email
+            ).delete()
             
-#             # Delete the member
-#             return super().perform_destroy(instance)
+            # Delete the member
+            return super().perform_destroy(instance)
 
 
-# class OrganizationMemberInvitationViewSet(TimezoneMixin,viewsets.ModelViewSet):
-#     pagination_class = CustomPagination
-#     filter_backends = [filters.SearchFilter, DjangoFilterBackend]
-#     search_fields = ['email']
+class MemberInvitationViewSet(TimezoneMixin,viewsets.ModelViewSet):
+    pagination_class = DefaultPagination
+    filter_backends = [filters.SearchFilter, DjangoFilterBackend]
+    search_fields = ['email']
     
-#     def get_permissions(self):
-#         if self.request.method in ['POST']:
-#             return [IsAuthenticated(), OrganizationPermission(Permission.CREATE_MEMBER_INVITATION)]
-#         elif self.request.method in ['PATCH', 'PUT']:
-#             return [IsAuthenticated()]
-#         elif self.request.method in ['DELETE']:
-#             return [IsAuthenticated(), OrganizationPermission(Permission.DELETE_MEMBER_INVITATION)]
-#         return [IsAuthenticated()]
+    def get_permissions(self):
+        if self.request.method in ['POST']:
+            return [IsAuthenticated(), OrganizationPermission(Permission.CREATE_MEMBER_INVITATION)]
+        elif self.request.method in ['PATCH', 'PUT']:
+            return [IsAuthenticated()]
+        elif self.request.method in ['DELETE']:
+            return [IsAuthenticated(), OrganizationPermission(Permission.DELETE_MEMBER_INVITATION)]
+        return [IsAuthenticated()]
     
-#     def get_queryset(self):
-#         # Optimize query with select_related
-#         return OrganizationMemberInvitation.objects.filter(
-#             organization_id=self.kwargs['organization_pk']
-#         ).select_related('organization', 'invited_by')
+    def get_queryset(self):
+        # Optimize query with select_related
+        return MemberInvitation.objects.filter(
+            organization_id=self.kwargs['organization_pk']
+        ).select_related('organization', 'invited_by')
     
-#     def get_serializer_class(self):
-#         if self.request.method == 'POST':
-#             return  CreateInviteOrganizationMemberSerializer
-#         elif self.request.method in ['PATCH', 'PUT']:
-#             return UpdateInviteOrganizationMemberSerializer
-#         return InvitedOrganizationMemberSerializer
+    def get_serializer_class(self):
+        if self.request.method == 'POST':
+            return  CreateInviteMemberSerializer
+        elif self.request.method in ['PATCH', 'PUT']:
+            return UpdateInviteMemberSerializer
+        return InvitedMemberSerializer
     
-#     def perform_destroy(self, instance):
-#         if instance.status != OrganizationMemberInvitation.PENDING:
-#             from rest_framework.exceptions import ValidationError
-#             raise ValidationError("Only pending invitations can be deleted.")
-#         return super().perform_destroy(instance)
+    def perform_destroy(self, instance):
+        if instance.status != MemberInvitation.PENDING:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError("Only pending invitations can be deleted.")
+        return super().perform_destroy(instance)
     
     
-#     #TODO: check if the user has the proper permission
-#     def perform_create(self, serializer):
-#         # Check if the user has the proper permission
-#         if not self.request.user.has_perm(Permission.CREATE_MEMBER_INVITATION, serializer.validated_data.get('organization')):
-#             from rest_framework.exceptions import PermissionDenied
-#             raise PermissionDenied(_("You don't have permission to create member invitations."))
+    #TODO: check if the user has the proper permission
+    def perform_create(self, serializer):
+        # Check if the user has the proper permission
+        if not self.request.user.has_perm(Permission.CREATE_MEMBER_INVITATION, serializer.validated_data.get('organization')):
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied(_("You don't have permission to create member invitations."))
         
-#         serializer.save()
+        serializer.save()
     
 
-#     def get_serializer_context(self):
-#         # Get the context from the parent class (including timezone)
-#         context = super().get_serializer_context()
-#         # Add your custom context
-#         context['organization_id'] = self.kwargs['organization_pk']
-#         return context
+    def get_serializer_context(self):
+        # Get the context from the parent class (including timezone)
+        context = super().get_serializer_context()
+        # Add your custom context
+        context['organization_id'] = self.kwargs['organization_pk']
+        return context
     
     
     
