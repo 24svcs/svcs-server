@@ -15,7 +15,7 @@ from django.core.cache import cache
 
 
 def validate_organization_user_id(value):
-    query = Organization.objects.filter(user_id=value).exists()
+    query = Organization.objects.filter(user_id=value).only('user_id').exists()
     if query:
         raise serializers.ValidationError(_('Can not create another Organization with the same user'))
     return value
@@ -54,10 +54,11 @@ class OrganizationSerializer(serializers.ModelSerializer):
     member_limit = serializers.SerializerMethodField()
     member_count = serializers.SerializerMethodField()
     role = serializers.SerializerMethodField()
+    
     class Meta:
         model = Organization
         fields = [
-            'id', 'name', 'name_space', 'email', 'phone', 'tax_id', 'organization_type', 'industry', 'is_verified', 'description', 'logo_url',  'member_count',  'member_limit', 'role',   'created_at','updated_at',
+            'id', 'name', 'name_space', 'email', 'phone', 'tax_id', 'organization_type', 'industry', 'is_verified', 'description', 'logo_url', 'member_count',  'member_limit', 'role',
             
         ]
     

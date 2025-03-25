@@ -63,15 +63,11 @@ class OrganizationViewSet(TimezoneMixin, viewsets.ModelViewSet):
                 'id', 'name', 'name_space', 'email', 'logo_url'
             ).distinct()
         else:
-            # Optimize with select_related and prefetch_related to avoid N+1 queries
             return Organization.objects.prefetch_related(
-                'members',
-                'members__user',
-                'members__permissions'
+                # 'members__permissions',
             ).select_related(
-                # Add any direct foreign key relationships here if needed
+
             ).filter(
-                id=self.kwargs.get('pk'),
                 members__user=user,
                 members__status=Member.ACTIVE,
             ).distinct().order_by('name')
@@ -84,6 +80,7 @@ class OrganizationViewSet(TimezoneMixin, viewsets.ModelViewSet):
         elif self.action == 'destroy':
             return [IsAuthenticated(), OrganizationPermission(Permission.DELETE_ORGANIZATION)]
         return [IsAuthenticated()]
+
 
 
     def get_serializer_class(self):
