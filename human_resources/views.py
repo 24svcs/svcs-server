@@ -477,10 +477,11 @@ class DepartmentAttendanceReportView(BaseAttendanceReportView):
     
     def get(self, request, organization_pk):
         # Get date range
-        start_date, end_date = self.get_date_range(request)
-        if isinstance(start_date, Response):  # Error occurred
-            return start_date
+        date_range = self.get_date_range(request)
+        if isinstance(date_range, Response):  # Error occurred
+            return date_range
             
+        start_date, end_date = date_range
         department_id = request.query_params.get('department_id')
         
         # If specific department is requested, return error since this view is for all departments
@@ -546,34 +547,37 @@ class DepartmentAttendanceReportView(BaseAttendanceReportView):
             # Calculate total working days across all employees
             dept_total_working_days = 0
             for employee in dept_employees:
-                    try:
-                        days_off = employee.employment_details.days_off or []
-                    except (AttributeError, EmploymentDetails.DoesNotExist):
-                        days_off = []
-                    
-                    # Count working days for this employee
-            employee_working_days = self.calculate_working_days(start_date, end_date, days_off)
-            dept_total_working_days += employee_working_days
+                try:
+                    days_off = employee.employment_details.days_off or []
+                except (AttributeError, EmploymentDetails.DoesNotExist):
+                    days_off = []
                 
+                # Count working days for this employee
+                employee_working_days = self.calculate_working_days(start_date, end_date, days_off)
+                dept_total_working_days += employee_working_days
+            
             # Calculate department statistics
             dept_attendance_percentage = round((dept_days_present / dept_total_working_days) * 100, 2) if dept_total_working_days > 0 else 0
-                
+            
             department_stats.append({
-                    'id': dept.id,
-                    'name': dept.name,
-                    'employee_count': dept_employee_count,
-                    'days_present': dept_days_present,
-                    'days_absent': dept_days_absent,
-                    'days_late': dept_days_late,
-                    'attendance_percentage': dept_attendance_percentage
-                })
+                'id': dept.id,
+                'name': dept.name,
+                'employee_count': dept_employee_count,
+                'days_present': dept_days_present,
+                'days_absent': dept_days_absent,
+                'days_late': dept_days_late,
+                'attendance_percentage': dept_attendance_percentage
+            })
+        
+        # Calculate total days safely
+        total_days = (end_date - start_date).days + 1 if start_date and end_date else 0
         
         # Generate the report
         report = {
             'report_period': {
-                'start_date': start_date.isoformat(),
-                'end_date': end_date.isoformat(),
-                'total_days': (end_date - start_date).days + 1,
+                'start_date': start_date.isoformat() if start_date else None,
+                'end_date': end_date.isoformat() if end_date else None,
+                'total_days': total_days,
             },
             'department_statistics': department_stats,
         }
@@ -588,10 +592,11 @@ class OverallAttendanceReportView(BaseAttendanceReportView):
     
     def get(self, request, organization_pk):
         # Get date range and department filter
-        start_date, end_date = self.get_date_range(request)
-        if isinstance(start_date, Response):  # Error occurred
-            return start_date
+        date_range = self.get_date_range(request)
+        if isinstance(date_range, Response):  # Error occurred
+            return date_range
             
+        start_date, end_date = date_range
         department_id = request.query_params.get('department_id')
         
         # Use Django's aggregation for efficient counting
@@ -599,7 +604,7 @@ class OverallAttendanceReportView(BaseAttendanceReportView):
         employees_queryset = self.get_employees_queryset(organization_pk, start_date, end_date, department_id)
         
         # Calculate total days in the period
-        total_days = (end_date - start_date).days + 1
+        total_days = (end_date - start_date).days + 1 if start_date and end_date else 0
         
         # Calculate overall statistics using efficient aggregation
         total_employees = employees_queryset.count()
@@ -619,11 +624,16 @@ class OverallAttendanceReportView(BaseAttendanceReportView):
         # Calculate overall attendance percentage
         department_description = f"Department {department_id}" if department_id else "All departments"
         
+        # Calculate average attendance percentage safely
+        average_attendance_percentage = 0
+        if total_days and total_employees:
+            average_attendance_percentage = round((total_present / (total_days * total_employees)) * 100, 2)
+        
         # Generate the report
         report = {
             'report_period': {
-                'start_date': start_date.isoformat(),
-                'end_date': end_date.isoformat(),
+                'start_date': start_date.isoformat() if start_date else None,
+                'end_date': end_date.isoformat() if end_date else None,
                 'total_days': total_days,
                 'scope': department_description,
             },
@@ -633,7 +643,7 @@ class OverallAttendanceReportView(BaseAttendanceReportView):
                 'total_present': total_present,
                 'total_absent': total_absent,
                 'total_late': total_late,
-                'average_attendance_percentage': round((total_present / (total_days * total_employees)) * 100, 2) if total_days * total_employees > 0 else 0
+                'average_attendance_percentage': average_attendance_percentage
             }
         }
         
