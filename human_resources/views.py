@@ -25,6 +25,7 @@ from rest_framework.views import APIView
 from django.db.models import Count, Q
 
 from django.utils import timezone
+from django.db import models
     
 class DepartmentModelViewset(ModelViewSet):
     pagination_class = DefaultPagination
@@ -195,13 +196,17 @@ class AttendanceModelViewset(TimezoneMixin, ModelViewSet):
         cached_timezone = cache.get(cache_key)
         
         if cached_timezone:
-            return cached_timezone
+            return pytz.timezone(cached_timezone) if isinstance(cached_timezone, str) else cached_timezone
         
         try:
             org_preferences = Preference.objects.select_related('organization').get(
                 organization_id=organization_id
             )
             organization_timezone = org_preferences.timezone
+            
+            # Convert to timezone object if it's a string
+            if isinstance(organization_timezone, str):
+                organization_timezone = pytz.timezone(organization_timezone)
             
             # Cache the timezone for 1 hour (3600 seconds)
             cache.set(cache_key, organization_timezone, 3600)
@@ -276,11 +281,11 @@ class AttendanceModelViewset(TimezoneMixin, ModelViewSet):
 
 
 # Attendance Reports
-class BaseAttendanceReportView(TimezoneMixin, APIView):
+class BaseAttendanceReportView(APIView):
     """Base class for attendance report views with common functionality."""
     
     def get_date_range(self, request):
-        # This method is already optimized
+        # Simple date handling - assume dates are in organization's context
         today = timezone.now().date()
         start_date = request.query_params.get('start_date', today.replace(day=1).isoformat())
         end_date = request.query_params.get('end_date', today.isoformat())
@@ -296,7 +301,7 @@ class BaseAttendanceReportView(TimezoneMixin, APIView):
             )
     
     def get_filtered_queryset(self, organization_pk, start_date, end_date, department_id=None):
-        # Improve by adding select_related for common joins
+        # Simple date filtering - no timezone conversion needed
         queryset = Attendance.objects.select_related(
             'employee',
             'employee__employment_details',
@@ -315,13 +320,18 @@ class BaseAttendanceReportView(TimezoneMixin, APIView):
             
         return queryset
     
-    def get_employees_queryset(self, organization_pk, department_id=None):
-        # Improve by adding select_related for common joins
+    def get_employees_queryset(self, organization_pk, start_date, end_date, department_id=None):
+        # Get employees who have attendance records within the date range
         employees_queryset = Employee.objects.select_related(
             'employment_details',
             'employment_details__position',
             'employment_details__position__department'
-        ).filter(organization_id=organization_pk)
+        ).filter(
+            organization_id=organization_pk,
+            # Only include employees who have attendance records in the date range
+            attendances__date__gte=start_date,
+            attendances__date__lte=end_date
+        ).distinct()  # Use distinct to avoid duplicates
         
         if department_id:
             employees_queryset = employees_queryset.filter(
@@ -431,17 +441,28 @@ class EmployeeAttendanceReportView(BaseAttendanceReportView):
         
         # Get filtered querysets with eager loading
         attendance_queryset = self.get_filtered_queryset(organization_pk, start_date, end_date, department_id)
-        employees_queryset = self.get_employees_queryset(organization_pk, department_id)
+        employees_queryset = self.get_employees_queryset(organization_pk, start_date, end_date, department_id)
         
-        # Use prefetch_related with the correct related name
-        employees_queryset = employees_queryset.prefetch_related('attendances')
+        # Use prefetch_related with date filtering
+        employees_queryset = employees_queryset.prefetch_related(
+            models.Prefetch(
+                'attendances',
+                queryset=Attendance.objects.filter(
+                    date__gte=start_date,
+                    date__lte=end_date
+                )
+            )
+        )
         
         # Calculate total days in the period
         total_days = (end_date - start_date).days + 1
         
-        # Preload all employee attendance records for the period to avoid N+1 problem
+        # Preload all employee attendance records for the period
         employee_attendance_map = {}
-        for attendance in attendance_queryset:
+        for attendance in attendance_queryset.filter(
+            date__gte=start_date,
+            date__lte=end_date
+        ):
             if attendance.employee_id not in employee_attendance_map:
                 employee_attendance_map[attendance.employee_id] = []
             employee_attendance_map[attendance.employee_id].append(attendance)
@@ -663,27 +684,27 @@ class DepartmentAttendanceReportView(BaseAttendanceReportView):
             # Calculate total working days across all employees
             dept_total_working_days = 0
             for employee in dept_employees:
-                try:
-                    days_off = employee.employment_details.days_off or []
-                except (AttributeError, EmploymentDetails.DoesNotExist):
-                    days_off = []
+                    try:
+                        days_off = employee.employment_details.days_off or []
+                    except (AttributeError, EmploymentDetails.DoesNotExist):
+                        days_off = []
+                    
+                    # Count working days for this employee
+            employee_working_days = self.calculate_working_days(start_date, end_date, days_off)
+            dept_total_working_days += employee_working_days
                 
-                # Count working days for this employee
-                employee_working_days = self.calculate_working_days(start_date, end_date, days_off)
-                dept_total_working_days += employee_working_days
-            
             # Calculate department statistics
             dept_attendance_percentage = round((dept_days_present / dept_total_working_days) * 100, 2) if dept_total_working_days > 0 else 0
-            
+                
             department_stats.append({
-                'id': dept.id,
-                'name': dept.name,
-                'employee_count': dept_employee_count,
-                'days_present': dept_days_present,
-                'days_absent': dept_days_absent,
-                'days_late': dept_days_late,
-                'attendance_percentage': dept_attendance_percentage
-            })
+                    'id': dept.id,
+                    'name': dept.name,
+                    'employee_count': dept_employee_count,
+                    'days_present': dept_days_present,
+                    'days_absent': dept_days_absent,
+                    'days_late': dept_days_late,
+                    'attendance_percentage': dept_attendance_percentage
+                })
         
         # Generate the report
         report = {
@@ -713,7 +734,7 @@ class OverallAttendanceReportView(BaseAttendanceReportView):
         
         # Use Django's aggregation for efficient counting
         attendance_queryset = self.get_filtered_queryset(organization_pk, start_date, end_date, department_id)
-        employees_queryset = self.get_employees_queryset(organization_pk, department_id)
+        employees_queryset = self.get_employees_queryset(organization_pk, start_date, end_date, department_id)
         
         # Calculate total days in the period
         total_days = (end_date - start_date).days + 1
