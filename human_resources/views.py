@@ -547,27 +547,27 @@ class DepartmentAttendanceReportView(BaseAttendanceReportView):
             # Calculate total working days across all employees
             dept_total_working_days = 0
             for employee in dept_employees:
-                try:
-                    days_off = employee.employment_details.days_off or []
-                except (AttributeError, EmploymentDetails.DoesNotExist):
-                    days_off = []
+                    try:
+                        days_off = employee.employment_details.days_off or []
+                    except (AttributeError, EmploymentDetails.DoesNotExist):
+                        days_off = []
+                    
+                    # Count working days for this employee
+            employee_working_days = self.calculate_working_days(start_date, end_date, days_off)
+            dept_total_working_days += employee_working_days
                 
-                # Count working days for this employee
-                employee_working_days = self.calculate_working_days(start_date, end_date, days_off)
-                dept_total_working_days += employee_working_days
-            
             # Calculate department statistics
             dept_attendance_percentage = round((dept_days_present / dept_total_working_days) * 100, 2) if dept_total_working_days > 0 else 0
-            
+                
             department_stats.append({
-                'id': dept.id,
-                'name': dept.name,
-                'employee_count': dept_employee_count,
-                'days_present': dept_days_present,
-                'days_absent': dept_days_absent,
-                'days_late': dept_days_late,
-                'attendance_percentage': dept_attendance_percentage
-            })
+                    'id': dept.id,
+                    'name': dept.name,
+                    'employee_count': dept_employee_count,
+                    'days_present': dept_days_present,
+                    'days_absent': dept_days_absent,
+                    'days_late': dept_days_late,
+                    'attendance_percentage': dept_attendance_percentage
+                })
         
         # Calculate total days safely
         total_days = (end_date - start_date).days + 1 if start_date and end_date else 0

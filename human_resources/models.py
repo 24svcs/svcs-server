@@ -5,6 +5,11 @@ from phonenumber_field.modelfields import PhoneNumberField
 from core.models import User
 from organization.models import Organization
 import random
+from django.core.exceptions import ValidationError
+from django.db.models.signals import pre_save
+from django.dispatch import receiver
+
+
 
 def generate_unique_employee_id():
     employee_id = None
@@ -33,13 +38,17 @@ class Department(models.Model):
     def __str__(self):
         return self.name
 
+    def clean(self):
+        if self.manager and self.manager.organization != self.organization:
+            raise ValidationError("Manager must belong to the same organization")
+
 class Position(models.Model):
     title = models.CharField(max_length=100, validators=[MinLengthValidator(3)],  unique=True)
     organization = models.ForeignKey(Organization, related_name='positions', on_delete=models.CASCADE)
     department = models.ForeignKey(Department, on_delete=models.CASCADE, related_name='positions')
     description = models.TextField(blank=True, null=True)
-    salary_range_min = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
-    salary_range_max = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
+    salary_range_min = models.DecimalField(max_digits=10, decimal_places=2)
+    salary_range_max = models.DecimalField(max_digits=10, decimal_places=2)
 
     class Meta:
         indexes = [
@@ -48,14 +57,23 @@ class Position(models.Model):
         ]
         constraints = [
             models.UniqueConstraint(fields=['organization', 'title'], name='unique_position_per_organization'),
+
             models.CheckConstraint(
                 condition=models.Q(salary_range_max__gte=models.F('salary_range_min')),
                 name='salary_range_max_gte_min'
+            ),
+            models.CheckConstraint(
+                condition=models.Q(salary_range_min__gt=0),
+                name='salary_range_min_positive'
             )
         ]
 
     def __str__(self):
         return f"{self.title} - {self.department.name}"
+
+    def clean(self):
+        if self.department.organization != self.organization:
+            raise ValidationError("Department must belong to the same organization")
 
 class Employee(models.Model):
     GENDER_CHOICES = (
@@ -118,6 +136,7 @@ class EmploymentDetails(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     
+    
     class Meta:
         indexes = [
             models.Index(fields=['employee']),
@@ -125,10 +144,27 @@ class EmploymentDetails(models.Model):
             models.Index(fields=['employment_status']),
             models.Index(fields=['hire_date']),
         ]
-       
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(shift_end__gt=models.F('shift_start')),
+                name='shift_end_after_start'
+            ),
+            models.CheckConstraint(
+                condition=models.Q(days_off__isnull=True) |
+                         models.Q(days_off__contained_by=[
+                             'MONDAY', 'TUESDAY', 'WEDNESDAY', 'THURSDAY', 'FRIDAY', 'SATURDAY', 'SUNDAY']),
+                name='valid_days_off'
+            )
+        ]
     
     def __str__(self):
         return f"Employment details for {self.employee}"
+
+    def clean(self):
+        if self.position.organization != self.employee.organization:
+            raise ValidationError("Position must belong to employee's organization")
+        if self.salary < self.position.salary_range_min or self.salary > self.position.salary_range_max:
+            raise ValidationError("Salary must be within position's range")
 
 class Attendance(models.Model):
     ATTENDANCE_ON_TIME = 'O'
@@ -159,13 +195,31 @@ class Attendance(models.Model):
         constraints = [
             models.UniqueConstraint(fields=['employee', 'date'], name='unique_attendance_per_day'),
             models.CheckConstraint(
-                condition=models.Q(time_out__isnull=True) | models.Q(time_out__gt=models.F('time_in')),
+                condition=models.Q(time_out__isnull=True) | 
+                         models.Q(time_out__gt=models.F('time_in')),
                 name='time_out_after_time_in'
+            ),
+            models.CheckConstraint(
+                condition=(models.Q(status='A') & models.Q(time_out__isnull=True)) |
+                         models.Q(status__in=['O', 'L']),
+                name='status_time_consistency'
             )
         ]
     
     def __str__(self):
         return f"{self.employee.first_name} - {self.date} - {self.status}"
+
+    def clean(self):
+        if self.employee.organization != self.organization:
+            raise ValidationError("Employee must belong to the organization")
+        if self.time_in and self.employee.employment_details.shift_start:
+            if self.time_in < self.employee.employment_details.shift_start:
+                raise ValidationError("Time in must be after shift start")
+
+@receiver(pre_save, sender=Attendance)
+def validate_attendance(sender, instance, **kwargs):
+    if instance.employee.organization != instance.organization:
+        raise ValidationError("Employee must belong to the organization")
 
 class Payroll(models.Model):
     STATUSES_CHOICES = [
@@ -243,3 +297,62 @@ class Payroll(models.Model):
     
     def __str__(self):
         return f"{self.employee.first_name} - {self.period_start} to {self.period_end}"
+
+
+class EmployeeAttendance(models.Model):
+    employee = models.ForeignKey(Employee, on_delete=models.CASCADE, related_name='employee_attendances')
+    organization = models.ForeignKey(Organization, on_delete=models.CASCADE, related_name='employee_attendances')
+    date = models.DateField()
+    is_present = models.BooleanField(default=False)
+    is_late = models.BooleanField(default=False)
+    is_absent = models.BooleanField(default=False)
+    late_minutes = models.IntegerField(default=0)
+    working_hours = models.DecimalField(max_digits=6, decimal_places=2, default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        indexes = [
+            models.Index(fields=['employee']),
+            models.Index(fields=['date']),
+            models.Index(fields=['is_present']),
+            models.Index(fields=['is_late']),
+            models.Index(fields=['is_absent']),
+            models.Index(fields=['organization', 'date']),  # For organization-wide reports
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['employee', 'date'], 
+                name='unique_employee_attendance_stat_per_day'
+            ),
+            models.CheckConstraint(
+                condition=~(models.Q(is_present=True) & models.Q(is_absent=True)),
+                name='cannot_be_present_and_absent'
+            ),
+            models.CheckConstraint(
+                condition=models.Q(working_hours__gte=0),
+                name='working_hours_non_negative'
+            ),
+            models.CheckConstraint(
+                condition=(models.Q(is_late=False) & models.Q(late_minutes=0)) |
+                         models.Q(is_late=True) & models.Q(late_minutes__gt=0),
+                name='late_minutes_consistency'
+            ),
+            models.CheckConstraint(
+                condition=(models.Q(is_absent=True) & models.Q(working_hours=0)) |
+                         models.Q(is_absent=False),
+                name='working_hours_zero_when_absent'
+            ),
+            models.CheckConstraint(
+                condition=models.Q(late_minutes__gte=0) & models.Q(late_minutes__lte=720),
+                name='late_minutes_bounds'
+            ),
+            models.CheckConstraint(
+                condition=models.Q(working_hours__lte=24),
+                name='working_hours_max_bound'
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.employee.first_name} - {self.date} - {'Present' if self.is_present else 'Absent'}"
+
