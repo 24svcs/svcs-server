@@ -22,8 +22,8 @@ from core.pagination import DefaultPagination
 from rest_framework import  filters
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.views import APIView
-from django.db.models import Count, Sum, F, ExpressionWrapper, DurationField, Avg, Q
-from django.db.models.functions import Extract
+from django.db.models import Count, Q
+
 from django.utils import timezone
     
 class DepartmentModelViewset(ModelViewSet):
@@ -344,7 +344,9 @@ class BaseAttendanceReportView(TimezoneMixin, APIView):
 class EmployeeAttendanceReportView(BaseAttendanceReportView):
     """
     Generate attendance reports for individual employees with attendance scoring.
+    Includes pagination for handling large employee datasets.
     """
+    pagination_class = DefaultPagination
     
     def calculate_attendance_score(self, 
                                   employee_working_days, 
@@ -567,17 +569,22 @@ class EmployeeAttendanceReportView(BaseAttendanceReportView):
                 }
             })
         
-        # Generate the report
+        # Apply pagination to the employee stats list
+        paginator = self.pagination_class()
+        paginated_stats = paginator.paginate_queryset(employee_stats, request)
+        
+        # Generate the report with paginated data
         report = {
             'report_period': {
                 'start_date': start_date.isoformat(),
                 'end_date': end_date.isoformat(),
                 'total_days': total_days,
             },
-            'employee_statistics': employee_stats,
+            'employee_statistics': paginated_stats,
         }
         
-        return Response(report, status=status.HTTP_200_OK)
+        # Return paginated response
+        return paginator.get_paginated_response(report)
 
 
 class DepartmentAttendanceReportView(BaseAttendanceReportView):
