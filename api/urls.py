@@ -2,7 +2,15 @@ from django.urls import path, include
 from rest_framework_nested import routers
 from core.views import LanguageViewSet
 from organization.views import OrganizationViewSet, MemberViewSet, MemberInvitationViewSet
-from human_resources.views import DepartmentModelViewset, PositionModelViewset, EmployeeModelViewset, AttendanceModelViewset, AttendanceReportView
+from human_resources.views import (
+    DepartmentModelViewset, 
+    PositionModelViewset, 
+    EmployeeModelViewset, 
+    AttendanceModelViewset, 
+    EmployeeAttendanceReportView,
+    DepartmentAttendanceReportView,
+    OverallAttendanceReportView
+)
 router = routers.DefaultRouter()
 router.register('languages', LanguageViewSet, basename='languages')
 router.register(r'organizations', OrganizationViewSet, basename='organizations')
@@ -39,5 +47,17 @@ urlpatterns = [
      path(r'', include(position_router.urls)),
      path(r'', include(employee_router.urls)),
      path(r'', include(attendance_router.urls)),
-     path('organizations/<str:organization_pk>/attendance-report/', AttendanceReportView.as_view(), name='organization-attendance-report'),
+     
+     # Attendance report endpoints
+     path('organizations/<str:organization_pk>/attendance-report/employees/', 
+          EmployeeAttendanceReportView.as_view(), 
+          name='organization-employee-attendance-report'),
+     
+     path('organizations/<str:organization_pk>/attendance-report/departments/', 
+          DepartmentAttendanceReportView.as_view(), 
+          name='organization-department-attendance-report'),
+     
+     path('organizations/<str:organization_pk>/attendance-report/overall/', 
+          OverallAttendanceReportView.as_view(), 
+          name='organization-overall-attendance-report'),
 ]

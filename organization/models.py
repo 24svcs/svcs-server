@@ -43,7 +43,7 @@ class Organization(models.Model):
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='organization')
     name = models.CharField(max_length=64, unique=True)
     name_space = models.CharField(max_length=70, unique=True)
-    organization_type = models.CharField(max_length=10, choices=ORGANIZATION_TYPE_CHOICES, default=SOLO)
+    organization_type = models.CharField(max_length=10, choices=ORGANIZATION_TYPE_CHOICES, default=ENTERPRISE)
     email = models.EmailField(unique=True)
     phone = PhoneNumberField(unique=True)
     description = models.TextField(max_length=1000)

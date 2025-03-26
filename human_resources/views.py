@@ -273,98 +273,145 @@ class AttendanceModelViewset(TimezoneMixin, ModelViewSet):
         
         return Response(response_data, status=status.HTTP_201_CREATED)
 
-class AttendanceReportView(TimezoneMixin, APIView):
-    """
-    Generate a comprehensive attendance report for employees in an organization.
+
+
+# Attendance Reports
+class BaseAttendanceReportView(TimezoneMixin, APIView):
+    """Base class for attendance report views with common functionality."""
     
-    This report includes statistics on attendance patterns, including:
-    - Total working days
-    - Total days present
-    - Total days absent
-    - Total late arrivals
-    - Average working hours
-    - Total minutes late
-    
-    The report can be filtered by date range and department.
-    """
-    
-    def get(self, request, organization_pk):
-        # Get date range from request params (default to current month)
+    def get_date_range(self, request):
+        # This method is already optimized
         today = timezone.now().date()
         start_date = request.query_params.get('start_date', today.replace(day=1).isoformat())
         end_date = request.query_params.get('end_date', today.isoformat())
-        department_id = request.query_params.get('department_id')
         
-        # Convert string dates to date objects
         try:
             start_date = datetime.fromisoformat(start_date).date()
             end_date = datetime.fromisoformat(end_date).date()
+            return start_date, end_date
         except ValueError:
             return Response(
                 {"error": "Invalid date format. Use YYYY-MM-DD format."},
                 status=status.HTTP_400_BAD_REQUEST
             )
-            
-        # Initial queryset - filter by organization and date range
-        queryset = Attendance.objects.filter(
+    
+    def get_filtered_queryset(self, organization_pk, start_date, end_date, department_id=None):
+        # Improve by adding select_related for common joins
+        queryset = Attendance.objects.select_related(
+            'employee',
+            'employee__employment_details',
+            'employee__employment_details__position',
+            'employee__employment_details__position__department'
+        ).filter(
             organization_id=organization_pk,
             date__gte=start_date,
             date__lte=end_date
         )
         
-        # Filter by department if provided
         if department_id:
             queryset = queryset.filter(
                 employee__employment_details__position__department_id=department_id
             )
+            
+        return queryset
+    
+    def get_employees_queryset(self, organization_pk, department_id=None):
+        # Improve by adding select_related for common joins
+        employees_queryset = Employee.objects.select_related(
+            'employment_details',
+            'employment_details__position',
+            'employment_details__position__department'
+        ).filter(organization_id=organization_pk)
         
-        # Get all employees from the filtered department (or all)
-        employees_queryset = Employee.objects.filter(organization_id=organization_pk)
         if department_id:
             employees_queryset = employees_queryset.filter(
                 employment_details__position__department_id=department_id
             )
+        return employees_queryset
+    
+    def calculate_working_days(self, start_date, end_date, days_off):
+        # This method is already optimized
+        working_days = 0
+        current_date = start_date
+        while current_date <= end_date:
+            day_name = current_date.strftime('%A').upper()
+            if day_name not in days_off:
+                working_days += 1
+            current_date += timedelta(days=1)
+        return working_days
+
+
+class EmployeeAttendanceReportView(BaseAttendanceReportView):
+    """
+    Generate attendance reports for individual employees.
+    """
+    
+    def get(self, request, organization_pk):
+        # Get date range and department filter
+        start_date, end_date = self.get_date_range(request)
+        if isinstance(start_date, Response):  # Error occurred
+            return start_date
+            
+        department_id = request.query_params.get('department_id')
         
-        # Calculate total days in the period (include all days)
+        # Get filtered querysets with eager loading
+        attendance_queryset = self.get_filtered_queryset(organization_pk, start_date, end_date, department_id)
+        employees_queryset = self.get_employees_queryset(organization_pk, department_id)
+        
+        # Use prefetch_related with the correct related name 'attendances' instead of 'attendance_set'
+        employees_queryset = employees_queryset.prefetch_related(
+            'attendances'  # Correct related name from the model definition
+        )
+        
+        # Calculate total days in the period
         total_days = (end_date - start_date).days + 1
+        
+        # Preload all employee attendance records for the period to avoid N+1 problem
+        # This maps each employee ID to their attendance records
+        employee_attendance_map = {}
+        for attendance in attendance_queryset:
+            if attendance.employee_id not in employee_attendance_map:
+                employee_attendance_map[attendance.employee_id] = []
+            employee_attendance_map[attendance.employee_id].append(attendance)
         
         # Employee-specific statistics
         employee_stats = []
         
         for employee in employees_queryset:
-            employee_attendance = queryset.filter(employee=employee)
+            # Get pre-loaded attendance records for this employee
+            employee_attendance_records = employee_attendance_map.get(employee.id, [])
             
-            # Get employment details for shift times and days off
+            # Get employment details - data already loaded via select_related
             try:
-                employment_details = EmploymentDetails.objects.get(employee=employee)
+                employment_details = employee.employment_details
                 shift_start = employment_details.shift_start
-                days_off = employment_details.days_off or []  # Get employee's days off, default to empty list
-                department = employment_details.position.department.name if employment_details.position and employment_details.position.department else "N/A"
-                position = employment_details.position.title if employment_details.position else "N/A"
-            except EmploymentDetails.DoesNotExist:
+                days_off = employment_details.days_off or []
+                position = employment_details.position
+                
+                if position:
+                    department = position.department.name if position.department else "N/A"
+                    position_title = position.title
+                else:
+                    department = "N/A"
+                    position_title = "N/A"
+            except AttributeError:
                 shift_start = None
                 days_off = []
                 department = "N/A"
-                position = "N/A"
+                position_title = "N/A"
             
-            # Calculate individual working days (excluding their days off)
-            employee_working_days = 0
-            current_date = start_date
-            while current_date <= end_date:
-                day_name = current_date.strftime('%A').upper()  # Get day name (e.g., 'MONDAY')
-                if day_name not in days_off:  # If not a day off for this employee
-                    employee_working_days += 1
-                current_date += timedelta(days=1)
+            # Calculate individual working days
+            employee_working_days = self.calculate_working_days(start_date, end_date, days_off)
             
-            # Calculate individual statistics
-            days_present = employee_attendance.exclude(status=Attendance.ATTENDANCE_ABSENT).count()
-            days_absent = employee_attendance.filter(status=Attendance.ATTENDANCE_ABSENT).count()
-            days_late = employee_attendance.filter(status=Attendance.ATTENDANCE_LATE).count()
+            # Calculate individual statistics using in-memory data
+            days_present = sum(1 for a in employee_attendance_records if a.status != Attendance.ATTENDANCE_ABSENT)
+            days_absent = sum(1 for a in employee_attendance_records if a.status == Attendance.ATTENDANCE_ABSENT)
+            days_late = sum(1 for a in employee_attendance_records if a.status == Attendance.ATTENDANCE_LATE)
             
             # Calculate minutes late
             total_minutes_late = 0
             if shift_start:
-                for attendance in employee_attendance.filter(status=Attendance.ATTENDANCE_LATE):
+                for attendance in (a for a in employee_attendance_records if a.status == Attendance.ATTENDANCE_LATE):
                     time_in = datetime.combine(date.today(), attendance.time_in)
                     expected_time = datetime.combine(date.today(), shift_start)
                     
@@ -376,10 +423,10 @@ class AttendanceReportView(TimezoneMixin, APIView):
                         total_minutes_late += minutes_late
             
             # Calculate average working hours
-            avg_working_hours = 0
+            total_working_hours = 0
             count_with_complete_hours = 0
             
-            for attendance in employee_attendance.filter(time_out__isnull=False):
+            for attendance in (a for a in employee_attendance_records if a.time_out is not None):
                 time_in = datetime.combine(date.today(), attendance.time_in)
                 time_out = datetime.combine(date.today(), attendance.time_out)
                 
@@ -388,79 +435,27 @@ class AttendanceReportView(TimezoneMixin, APIView):
                     time_out = datetime.combine(date.today() + timedelta(days=1), attendance.time_out)
                 
                 working_hours = (time_out - time_in).total_seconds() / 3600
-                avg_working_hours += working_hours
+                total_working_hours += working_hours
                 count_with_complete_hours += 1
             
-            avg_working_hours = round(avg_working_hours / count_with_complete_hours, 2) if count_with_complete_hours > 0 else 0
+            avg_working_hours = round(total_working_hours / count_with_complete_hours, 2) if count_with_complete_hours > 0 else 0
             
-            # Use employee_working_days instead of working_days for percentage
+            # Calculate attendance percentage
             attendance_percentage = round((days_present / employee_working_days) * 100, 2) if employee_working_days > 0 else 0
             
             employee_stats.append({
                 'id': employee.id,
                 'name': f"{employee.first_name} {employee.last_name}",
                 'department': department,
-                'position': position,
+                'position': position_title,
                 'days_present': days_present,
                 'days_absent': days_absent,
                 'days_late': days_late,
                 'total_minutes_late': round(total_minutes_late, 2),
                 'average_working_hours': avg_working_hours,
-                'total_working_days': employee_working_days,  # Add this field to show employee-specific working days
+                'total_working_days': employee_working_days,
                 'attendance_percentage': attendance_percentage
             })
-        
-        # Calculate department-wise statistics if not filtered by department
-        department_stats = []
-        if not department_id:
-            departments = Department.objects.filter(organization_id=organization_pk)
-            
-            for dept in departments:
-                dept_employees = employees_queryset.filter(
-                    employment_details__position__department=dept
-                )
-                
-                dept_attendance = queryset.filter(
-                    employee__employment_details__position__department=dept
-                )
-                
-                dept_employee_count = dept_employees.count()
-                dept_days_present = dept_attendance.exclude(status=Attendance.ATTENDANCE_ABSENT).count()
-                dept_days_absent = dept_attendance.filter(status=Attendance.ATTENDANCE_ABSENT).count()
-                dept_days_late = dept_attendance.filter(status=Attendance.ATTENDANCE_LATE).count()
-                
-                dept_total_working_days = 0  # Initialize total working days for department
-                
-                # Calculate working days for each employee in this department
-                for employee in dept_employees:
-                    try:
-                        days_off = employee.employment_details.days_off or []
-                    except (AttributeError, EmploymentDetails.DoesNotExist):
-                        days_off = []
-                    
-                    # Count working days for this employee
-                    employee_working_days = 0
-                    current_date = start_date
-                    while current_date <= end_date:
-                        day_name = current_date.strftime('%A').upper()
-                        if day_name not in days_off:
-                            employee_working_days += 1
-                        current_date += timedelta(days=1)
-                    
-                    dept_total_working_days += employee_working_days
-                
-                # Calculate department statistics using the summed working days
-                dept_attendance_percentage = round((dept_days_present / dept_total_working_days) * 100, 2) if dept_total_working_days > 0 else 0
-                
-                department_stats.append({
-                    'id': dept.id,
-                    'name': dept.name,
-                    'employee_count': dept_employee_count,
-                    'days_present': dept_days_present,
-                    'days_absent': dept_days_absent,
-                    'days_late': dept_days_late,
-                    'attendance_percentage': dept_attendance_percentage
-                })
         
         # Generate the report
         report = {
@@ -469,35 +464,177 @@ class AttendanceReportView(TimezoneMixin, APIView):
                 'end_date': end_date.isoformat(),
                 'total_days': total_days,
             },
-            'overall_statistics': {
-                'total_employees': employees_queryset.count(),
-                'total_attendance_records': queryset.count(),
-                'total_present': queryset.exclude(status=Attendance.ATTENDANCE_ABSENT).count(),
-                'total_absent': queryset.filter(status=Attendance.ATTENDANCE_ABSENT).count(),
-                'total_late': queryset.filter(status=Attendance.ATTENDANCE_LATE).count(),
-                'average_attendance_percentage': round((queryset.exclude(status=Attendance.ATTENDANCE_ABSENT).count() / (total_days * employees_queryset.count())) * 100, 2) if total_days * employees_queryset.count() > 0 else 0
-            },
             'employee_statistics': employee_stats,
         }
         
-        # Add department statistics if not filtered
-        if not department_id:
-            report['department_statistics'] = department_stats
-        
         return Response(report, status=status.HTTP_200_OK)
 
-    def destroy(self, request, *args, **kwargs):
-        instance = self.get_object()
+
+class DepartmentAttendanceReportView(BaseAttendanceReportView):
+    """
+    Generate attendance reports aggregated by department.
+    """
+    
+    def get(self, request, organization_pk):
+        # Get date range
+        start_date, end_date = self.get_date_range(request)
+        if isinstance(start_date, Response):  # Error occurred
+            return start_date
+            
+        department_id = request.query_params.get('department_id')
         
-        # Check if there are any employees associated with this position
-        has_employees = EmploymentDetails.objects.filter(position=instance).exists()
-        
-        if has_employees:
+        # If specific department is requested, return error since this view is for all departments
+        if department_id:
             return Response(
-                {"detail": _("Cannot delete position because it has employees assigned to it. Please reassign these employees to another position first.")},
+                {"error": "This endpoint provides reports for all departments. Remove the department_id parameter."},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # If no employees, proceed with deletion
-        self.perform_destroy(instance)
-        return Response(status=status.HTTP_204_NO_CONTENT)
+        # Get filtered querysets with optimized joins
+        attendance_queryset = self.get_filtered_queryset(organization_pk, start_date, end_date)
+        
+        # Load all departments in a single query with prefetched data
+        departments = Department.objects.filter(organization_id=organization_pk).prefetch_related(
+            'positions',
+            'positions__employment_details',
+            'positions__employment_details__employee'
+        )
+        
+        # Pre-calculate attendance statistics by department to avoid repeated queries
+        dept_attendance_stats = {}
+        for attendance in attendance_queryset:
+            try:
+                dept_id = attendance.employee.employment_details.position.department_id
+                if dept_id:
+                    if dept_id not in dept_attendance_stats:
+                        dept_attendance_stats[dept_id] = {
+                            'present': 0,
+                            'absent': 0,
+                            'late': 0
+                        }
+                    
+                    if attendance.status == Attendance.ATTENDANCE_ABSENT:
+                        dept_attendance_stats[dept_id]['absent'] += 1
+                    elif attendance.status == Attendance.ATTENDANCE_LATE:
+                        dept_attendance_stats[dept_id]['late'] += 1
+                        dept_attendance_stats[dept_id]['present'] += 1  # Late employees are also counted as present
+                    else:
+                        dept_attendance_stats[dept_id]['present'] += 1
+            except AttributeError:
+                # Skip attendance records without proper department association
+                continue
+        
+        # Calculate department-wise statistics
+        department_stats = []
+        
+        for dept in departments:
+            # Collect all employees in this department (already prefetched)
+            dept_employees = []
+            for position in dept.positions.all():
+                for emp_details in position.employment_details.all():
+                    if hasattr(emp_details, 'employee') and emp_details.employee:
+                        dept_employees.append(emp_details.employee)
+            
+            dept_employee_count = len(dept_employees)
+            
+            # Get attendance stats from our pre-calculated map
+            dept_stats = dept_attendance_stats.get(dept.id, {'present': 0, 'absent': 0, 'late': 0})
+            dept_days_present = dept_stats['present']
+            dept_days_absent = dept_stats['absent']
+            dept_days_late = dept_stats['late']
+            
+            # Calculate total working days across all employees
+            dept_total_working_days = 0
+            for employee in dept_employees:
+                try:
+                    days_off = employee.employment_details.days_off or []
+                except (AttributeError, EmploymentDetails.DoesNotExist):
+                    days_off = []
+                
+                # Count working days for this employee
+                employee_working_days = self.calculate_working_days(start_date, end_date, days_off)
+                dept_total_working_days += employee_working_days
+            
+            # Calculate department statistics
+            dept_attendance_percentage = round((dept_days_present / dept_total_working_days) * 100, 2) if dept_total_working_days > 0 else 0
+            
+            department_stats.append({
+                'id': dept.id,
+                'name': dept.name,
+                'employee_count': dept_employee_count,
+                'days_present': dept_days_present,
+                'days_absent': dept_days_absent,
+                'days_late': dept_days_late,
+                'attendance_percentage': dept_attendance_percentage
+            })
+        
+        # Generate the report
+        report = {
+            'report_period': {
+                'start_date': start_date.isoformat(),
+                'end_date': end_date.isoformat(),
+                'total_days': (end_date - start_date).days + 1,
+            },
+            'department_statistics': department_stats,
+        }
+        
+        return Response(report, status=status.HTTP_200_OK)
+
+
+class OverallAttendanceReportView(BaseAttendanceReportView):
+    """
+    Generate overall attendance statistics for the organization.
+    """
+    
+    def get(self, request, organization_pk):
+        # Get date range and department filter
+        start_date, end_date = self.get_date_range(request)
+        if isinstance(start_date, Response):  # Error occurred
+            return start_date
+            
+        department_id = request.query_params.get('department_id')
+        
+        # Use Django's aggregation for efficient counting
+        attendance_queryset = self.get_filtered_queryset(organization_pk, start_date, end_date, department_id)
+        employees_queryset = self.get_employees_queryset(organization_pk, department_id)
+        
+        # Calculate total days in the period
+        total_days = (end_date - start_date).days + 1
+        
+        # Calculate overall statistics using efficient aggregation
+        total_employees = employees_queryset.count()
+        
+        # Using Django's aggregation and annotation for better performance
+        attendance_stats = attendance_queryset.aggregate(
+            total_records=Count('id'),
+            total_absent=Count('id', filter=Q(status=Attendance.ATTENDANCE_ABSENT)),
+            total_late=Count('id', filter=Q(status=Attendance.ATTENDANCE_LATE))
+        )
+        
+        total_attendance_records = attendance_stats['total_records']
+        total_absent = attendance_stats['total_absent']
+        total_late = attendance_stats['total_late']
+        total_present = total_attendance_records - total_absent
+        
+        # Calculate overall attendance percentage
+        department_description = f"Department {department_id}" if department_id else "All departments"
+        
+        # Generate the report
+        report = {
+            'report_period': {
+                'start_date': start_date.isoformat(),
+                'end_date': end_date.isoformat(),
+                'total_days': total_days,
+                'scope': department_description,
+            },
+            'overall_statistics': {
+                'total_employees': total_employees,
+                'total_attendance_records': total_attendance_records,
+                'total_present': total_present,
+                'total_absent': total_absent,
+                'total_late': total_late,
+                'average_attendance_percentage': round((total_present / (total_days * total_employees)) * 100, 2) if total_days * total_employees > 0 else 0
+            }
+        }
+        
+        return Response(report, status=status.HTTP_200_OK)

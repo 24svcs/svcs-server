@@ -131,7 +131,7 @@ class CreateOrganizationSerializer(serializers.ModelSerializer):
     name_space = serializers.CharField(validators=[validate_namespace.validate_organization_namespace])
     email = serializers.EmailField(validators=[validate_email.validate_organization_email])
     phone  =  PhoneNumberField(validators=[validate_phone.validate_phone])
-    organization_type = serializers.ChoiceField(choices=Organization.ORGANIZATION_TYPE_CHOICES)
+    # organization_type = serializers.ChoiceField(choices=Organization.ORGANIZATION_TYPE_CHOICES)
     
     # OrganizationPreferences fields
     theme = serializers.ChoiceField(choices=Preference.MODE_CHOICES, default=Preference.SYSTEM)
@@ -141,7 +141,7 @@ class CreateOrganizationSerializer(serializers.ModelSerializer):
     class Meta:
         model = Organization
         fields = [
-            'id', 'name', 'name_space', 'email', 'phone', 'tax_id', 'organization_type', 'description', 'industry', 'logo_url', 
+            'id', 'name', 'name_space', 'email', 'phone', 'tax_id', 'description', 'industry', 'logo_url', 
             # OrganizationPreferences fields
             'theme', 'language_id', 'timezone'
         ]
