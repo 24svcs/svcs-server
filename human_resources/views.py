@@ -24,8 +24,8 @@ from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.views import APIView
 from django.db.models import Count, Q
 
-from django.utils import timezone
-from django.db import models
+from .utils.attendance_calculator import AttendanceCalculator
+from .utils.statistics_calculator import StatisticsCalculator
     
 class DepartmentModelViewset(ModelViewSet):
     pagination_class = DefaultPagination
@@ -285,30 +285,58 @@ class BaseAttendanceReportView(APIView):
     """Base class for attendance report views with common functionality."""
     
     def get_date_range(self, request):
-        # Simple date handling - assume dates are in organization's context
-        today = timezone.now().date()
-        start_date = request.query_params.get('start_date', today.replace(day=1).isoformat())
-        end_date = request.query_params.get('end_date', today.isoformat())
-        
+        """
+        Get and validate date range from request parameters.
+        Returns (start_date, end_date) tuple if valid, or None, None if not specified/invalid.
+        """
+        start_date_param = request.query_params.get('start_date', '')
+        end_date_param = request.query_params.get('end_date', '')
+
+        # Handle null, undefined, or empty string cases
+        if not start_date_param or start_date_param.lower() in ['null', 'undefined', '']:
+            start_date_param = None
+        if not end_date_param or end_date_param.lower() in ['null', 'undefined', '']:
+            end_date_param = None
+
+        # If no valid dates provided, return None to skip date filtering
+        if start_date_param is None and end_date_param is None:
+            return None, None
+
         try:
-            start_date = datetime.fromisoformat(start_date).date()
-            end_date = datetime.fromisoformat(end_date).date()
+            # Parse dates if provided
+            start_date = datetime.fromisoformat(start_date_param).date() if start_date_param else None
+            end_date = datetime.fromisoformat(end_date_param).date() if end_date_param else None
+
+            # Validate date range if both dates are provided
+            if start_date and end_date and start_date > end_date:
+                return Response(
+                    {"error": "Start date cannot be after end date."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
             return start_date, end_date
+
         except ValueError:
             return Response(
                 {"error": "Invalid date format. Use YYYY-MM-DD format."},
                 status=status.HTTP_400_BAD_REQUEST
             )
-    
+            
     def get_filtered_queryset(self, organization_pk, start_date, end_date, department_id=None):
-        # Simple date filtering - no timezone conversion needed
+        """
+        Get filtered queryset based on date range and department.
+        Date filtering is only applied if both dates are provided.
+        """
         queryset = Attendance.objects.select_related(
             'employee',
             'employee__employment_details',
             'employee__employment_details__position',
             'employee__employment_details__position__department'
-        ).filter(
-            organization_id=organization_pk,
+        ).filter(organization_id=organization_pk)
+        
+        # Only apply date filtering if both dates are provided and not None
+        if start_date is not None and end_date is not None:
+            queryset = queryset.filter(
             date__gte=start_date,
             date__lte=end_date
         )
@@ -317,29 +345,35 @@ class BaseAttendanceReportView(APIView):
             queryset = queryset.filter(
                 employee__employment_details__position__department_id=department_id
             )
-            
+        
         return queryset
     
     def get_employees_queryset(self, organization_pk, start_date, end_date, department_id=None):
-        # Get employees who have attendance records within the date range
+        """
+        Get all employees in the organization, regardless of attendance records.
+        """
         employees_queryset = Employee.objects.select_related(
             'employment_details',
             'employment_details__position',
             'employment_details__position__department'
-        ).filter(
-            organization_id=organization_pk,
-            # Only include employees who have attendance records in the date range
-            attendances__date__gte=start_date,
-            attendances__date__lte=end_date
-        ).distinct()  # Use distinct to avoid duplicates
-        
+        ).filter(organization_id=organization_pk)
+
         if department_id:
             employees_queryset = employees_queryset.filter(
                 employment_details__position__department_id=department_id
             )
-        return employees_queryset
+        
+        return employees_queryset.distinct()
     
     def calculate_working_days(self, start_date, end_date, days_off):
+        """
+        Calculate working days between two dates, excluding specified days off.
+        Returns 0 if either date is None.
+        """
+        # Return 0 if either date is None
+        if start_date is None or end_date is None:
+            return 0
+        
         # This method is already optimized
         working_days = 0
         current_date = start_date
@@ -358,254 +392,82 @@ class EmployeeAttendanceReportView(BaseAttendanceReportView):
     """
     pagination_class = DefaultPagination
     
-    def calculate_attendance_score(self, 
-                                  employee_working_days, 
-                                  days_present, 
-                                  days_absent, 
-                                  days_late, 
-                                  total_minutes_late, 
-                                  avg_working_hours,
-                                  expected_hours=8):
+    def _load_attendance_records(self, attendance_queryset, start_date, end_date):
         """
-        Calculate an attendance score based on multiple factors:
-        - Attendance rate (present days / working days)
-        - Punctuality (inverse of lateness frequency and duration)
-        - Work hours consistency (compared to expected hours)
-        
-        Returns a score from 0-100 where:
-        90-100: Excellent
-        80-89: Good
-        70-79: Satisfactory
-        60-69: Needs Improvement
-        <60: Poor
+        Load and map attendance records by employee ID.
         """
-        # Only calculate if we have working days
-        if employee_working_days == 0:
-            return 0
-        
-        # Base score components
-        # 1. Attendance rate (weighted at 50% of total score)
-        attendance_rate = days_present / employee_working_days
-        attendance_component = 50 * attendance_rate
-        
-        # 2. Punctuality (weighted at 30% of total score)
-        # Perfect punctuality (no late days) gets full 30 points
-        punctuality_rate = 1.0
-        if days_present > 0:
-            # Penalize for both frequency and severity of lateness
-            lateness_frequency = days_late / days_present if days_present > 0 else 0
-            average_minutes_late = total_minutes_late / days_late if days_late > 0 else 0
-            
-            # More severe penalty for frequent lateness
-            punctuality_rate -= (lateness_frequency * 0.7)
-            
-            # Additional penalty for severe lateness (over 30 minutes)
-            if average_minutes_late > 30:
-                punctuality_rate -= min(0.3, (average_minutes_late - 30) / 100)
-                
-        punctuality_component = 30 * max(0, punctuality_rate)
-            
-        # 3. Work hours consistency (weighted at 20% of total score)
-        hours_consistency = 1.0
-        if avg_working_hours > 0:
-            # Penalize for significant deviation from expected hours
-            hours_deviation = abs(avg_working_hours - expected_hours) / expected_hours
-            hours_consistency = max(0, 1 - hours_deviation)
-        hours_component = 20 * hours_consistency
-        
-        # Calculate total score (round to 1 decimal place)
-        attendance_score = round(attendance_component + punctuality_component + hours_component, 1)
-        
-        return attendance_score
-    
-    def get_score_category(self, score):
-        """Return the category label for a given attendance score."""
-        if score >= 90:
-            return "Excellent"
-        elif score >= 80:
-            return "Good"
-        elif score >= 70:
-            return "Satisfactory"
-        elif score >= 60:
-            return "Needs Improvement"
-        else:
-            return "Poor"
-    
-    def get(self, request, organization_pk):
-        # Get date range and department filter
-        start_date, end_date = self.get_date_range(request)
-        if isinstance(start_date, Response):  # Error occurred
-            return start_date
-            
-        department_id = request.query_params.get('department_id')
-        
-        # Get filtered querysets with eager loading
-        attendance_queryset = self.get_filtered_queryset(organization_pk, start_date, end_date, department_id)
-        employees_queryset = self.get_employees_queryset(organization_pk, start_date, end_date, department_id)
-        
-        # Use prefetch_related with date filtering
-        employees_queryset = employees_queryset.prefetch_related(
-            models.Prefetch(
-                'attendances',
-                queryset=Attendance.objects.filter(
-                    date__gte=start_date,
-                    date__lte=end_date
-                )
-            )
-        )
-        
-        # Calculate total days in the period
-        total_days = (end_date - start_date).days + 1
-        
-        # Preload all employee attendance records for the period
         employee_attendance_map = {}
-        for attendance in attendance_queryset.filter(
-            date__gte=start_date,
-            date__lte=end_date
-        ):
+        base_attendance_query = attendance_queryset
+        
+        # Only apply date filtering if both dates are provided
+        if start_date is not None and end_date is not None:
+            base_attendance_query = base_attendance_query.filter(
+                date__gte=start_date,
+                date__lte=end_date
+            )
+        
+        for attendance in base_attendance_query:
             if attendance.employee_id not in employee_attendance_map:
                 employee_attendance_map[attendance.employee_id] = []
             employee_attendance_map[attendance.employee_id].append(attendance)
-        
-        # Employee-specific statistics
-        employee_stats = []
-        
-        # Get organization-wide average expected hours (default to 8 if not defined)
-        expected_work_hours = 8
-        try:
-            # You might want to get this from organization preferences or another source
-            pass
-        except:
-            pass
-        
-        for employee in employees_queryset:
-            # Get pre-loaded attendance records for this employee
-            employee_attendance_records = employee_attendance_map.get(employee.id, [])
             
-            # Get employment details - data already loaded via select_related
-            try:
-                employment_details = employee.employment_details
-                shift_start = employment_details.shift_start
-                days_off = employment_details.days_off or []
-                position = employment_details.position
-                
-                if position:
-                    department = position.department.name if position.department else "N/A"
-                    position_title = position.title
-                else:
-                    department = "N/A"
-                    position_title = "N/A"
-                    
-                # Get employee-specific expected hours
-                if employment_details.shift_start and employment_details.shift_end:
-                    shift_start_dt = datetime.combine(date.today(), employment_details.shift_start)
-                    shift_end_dt = datetime.combine(date.today(), employment_details.shift_end)
-                    
-                    # Handle overnight shifts
-                    if shift_end_dt < shift_start_dt:
-                        shift_end_dt = datetime.combine(date.today() + timedelta(days=1), employment_details.shift_end)
-                    
-                    expected_work_hours = (shift_end_dt - shift_start_dt).total_seconds() / 3600
-            except AttributeError:
-                shift_start = None
-                days_off = []
-                department = "N/A"
-                position_title = "N/A"
-            
-            # Calculate individual working days
-            employee_working_days = self.calculate_working_days(start_date, end_date, days_off)
-            
-            # Calculate individual statistics using in-memory data
-            days_present = sum(1 for a in employee_attendance_records if a.status != Attendance.ATTENDANCE_ABSENT)
-            days_absent = sum(1 for a in employee_attendance_records if a.status == Attendance.ATTENDANCE_ABSENT)
-            days_late = sum(1 for a in employee_attendance_records if a.status == Attendance.ATTENDANCE_LATE)
-            
-            # Calculate minutes late
-            total_minutes_late = 0
-            if shift_start:
-                for attendance in (a for a in employee_attendance_records if a.status == Attendance.ATTENDANCE_LATE):
-                    time_in = datetime.combine(date.today(), attendance.time_in)
-                    expected_time = datetime.combine(date.today(), shift_start)
-                    
-                    # Add 15-minute grace period
-                    expected_time = expected_time + timedelta(minutes=15)
-                    
-                    if time_in > expected_time:
-                        minutes_late = (time_in - expected_time).total_seconds() / 60
-                        total_minutes_late += minutes_late
-            
-            # Calculate average working hours
-            total_working_hours = 0
-            count_with_complete_hours = 0
-            
-            for attendance in (a for a in employee_attendance_records if a.time_out is not None):
-                time_in = datetime.combine(date.today(), attendance.time_in)
-                time_out = datetime.combine(date.today(), attendance.time_out)
-                
-                # Handle overnight shifts
-                if time_out < time_in:
-                    time_out = datetime.combine(date.today() + timedelta(days=1), attendance.time_out)
-                
-                working_hours = (time_out - time_in).total_seconds() / 3600
-                total_working_hours += working_hours
-                count_with_complete_hours += 1
-            
-            avg_working_hours = round(total_working_hours / count_with_complete_hours, 2) if count_with_complete_hours > 0 else 0
-            
-            # Calculate attendance percentage
-            attendance_percentage = round((days_present / employee_working_days) * 100, 2) if employee_working_days > 0 else 0
-            
-            # Calculate attendance score
-            attendance_score = self.calculate_attendance_score(
-                employee_working_days,
-                days_present,
-                days_absent,
-                days_late,
-                total_minutes_late,
-                avg_working_hours,
-                expected_hours=expected_work_hours
-            )
-            
-            # Get score category
-            score_category = self.get_score_category(attendance_score)
-            
-            employee_stats.append({
-                'id': employee.id,
-                'name': f"{employee.first_name} {employee.last_name}",
-                'department': department,
-                'position': position_title,
-                'days_present': days_present,
-                'days_absent': days_absent,
-                'days_late': days_late,
-                'total_minutes_late': round(total_minutes_late, 2),
-                'average_working_hours': avg_working_hours,
-                'total_working_days': employee_working_days,
-                'attendance_percentage': attendance_percentage,
-                'attendance_score': attendance_score,
-                'score_category': score_category,
-                'score_breakdown': {
-                    'attendance_component': round(50 * (days_present / employee_working_days) if employee_working_days > 0 else 0, 1),
-                    'punctuality_component': round(30 * (1 - (days_late / days_present if days_present > 0 else 0)), 1),
-                    'hours_consistency_component': round(20 * (1 - min(1, abs(avg_working_hours - expected_work_hours) / expected_work_hours) if avg_working_hours > 0 else 0), 1)
-                }
-            })
-        
-        # Apply pagination to the employee stats list
+        return employee_attendance_map
+    
+    def _generate_paginated_response(self, employee_stats, start_date, end_date, request):
+        """
+        Generate paginated response with report data.
+        """
         paginator = self.pagination_class()
         paginated_stats = paginator.paginate_queryset(employee_stats, request)
+        
+        # Calculate total days in the period
+        total_days = (end_date - start_date).days + 1 if start_date and end_date else None
         
         # Generate the report with paginated data
         report = {
             'report_period': {
-                'start_date': start_date.isoformat(),
-                'end_date': end_date.isoformat(),
+                'start_date': start_date.isoformat() if start_date else None,
+                'end_date': end_date.isoformat() if end_date else None,
                 'total_days': total_days,
             },
             'employee_statistics': paginated_stats,
         }
         
-        # Return paginated response
         return paginator.get_paginated_response(report)
+    
+    def get(self, request, organization_pk):
+        # Get date range and department filter
+        date_range = self.get_date_range(request)
+        if isinstance(date_range, Response):  # Error occurred
+            return date_range
+        
+        start_date, end_date = date_range
+        department_id = request.query_params.get('department_id')
+        
+        # Get filtered querysets with eager loading
+        attendance_queryset = self.get_filtered_queryset(
+            organization_pk, start_date, end_date, department_id)
+        employees_queryset = self.get_employees_queryset(
+            organization_pk, start_date, end_date, department_id)
+        
+        # Load attendance records
+        employee_attendance_map = self._load_attendance_records(
+            attendance_queryset, start_date, end_date)
+        
+        # Calculate statistics for each employee
+        employee_stats = [
+            StatisticsCalculator.calculate_employee_statistics(
+                employee,
+                employee_attendance_map.get(employee.id, []),
+                start_date,
+                end_date
+            )
+            for employee in employees_queryset
+        ]
+        
+        # Paginate and return response
+        return self._generate_paginated_response(
+            employee_stats, start_date, end_date, request)
 
 
 class DepartmentAttendanceReportView(BaseAttendanceReportView):
@@ -664,7 +526,7 @@ class DepartmentAttendanceReportView(BaseAttendanceReportView):
         
         # Calculate department-wise statistics
         department_stats = []
-        
+            
         for dept in departments:
             # Collect all employees in this department (already prefetched)
             dept_employees = []

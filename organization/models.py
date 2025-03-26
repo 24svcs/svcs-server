@@ -61,6 +61,7 @@ class Organization(models.Model):
     
     class Meta:
         verbose_name_plural = "Organizations"
+        ordering = ['name']
         
         indexes = [
             
