@@ -19,13 +19,12 @@ from core.pagination import DefaultPagination
 
 from rest_framework import  filters
 from django_filters.rest_framework import DjangoFilterBackend
-from rest_framework.views import APIView
 from django.utils import timezone as tz
 
 from .serializers import EmployeeAttendanceStatsSerializer
 from django.db import models
 from .models import EmployeeAttendance
-    
+from rest_framework.viewsets import ReadOnlyModelViewSet
 class DepartmentModelViewset(ModelViewSet):
     pagination_class = DefaultPagination
     filter_backends = [filters.SearchFilter, DjangoFilterBackend]
@@ -281,7 +280,7 @@ class AttendanceModelViewset(TimezoneMixin, ModelViewSet):
         return Response(response_data, status=status.HTTP_201_CREATED)
 
 
-class EmployeeAttendanceStatsViewSet(TimezoneMixin, ModelViewSet):
+class EmployeeAttendanceStatsViewSet(TimezoneMixin, ReadOnlyModelViewSet):
     """
     ViewSet for retrieving employee attendance statistics.
     Provides aggregated statistics from EmployeeAttendance records.
