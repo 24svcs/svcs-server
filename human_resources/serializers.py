@@ -4,12 +4,46 @@ from django.utils import timezone as tz
 import pytz
 from api.libs import validate_phone
 from phonenumber_field.modelfields import PhoneNumberField
-from api.libs.tz import convert_datetime_to_timezone
-from human_resources.models import Department, Employee, Position, EmploymentDetails, Attendance
+from human_resources.models import Department, Employee, Position, EmploymentDetails, Attendance, EmployeeSchedule
 from django.db import transaction
 from organization.models import Preference
 from django.core.cache import cache
+from datetime import datetime
 
+
+class OrganizationTimezoneMixin:
+    def _get_organization_timezone(self, organization_id):
+        """
+        Helper method to get the organization's timezone.
+        Uses caching to reduce database queries.
+        """
+        cache_key = f"org_timezone_{organization_id}"
+        cached_timezone = cache.get(cache_key)
+        
+        if cached_timezone:
+            return pytz.timezone(str(cached_timezone))  # Convert to string first
+        
+        try:
+            org_preferences = Preference.objects.select_related('organization').get(
+                organization_id=organization_id
+            )
+            # Convert timezone to string first
+            timezone_str = str(org_preferences.timezone)
+            organization_timezone = pytz.timezone(timezone_str)
+            
+            # Cache the timezone string
+            cache.set(cache_key, timezone_str, 3600)
+            
+            return organization_timezone
+        except Preference.DoesNotExist:
+            # Default to UTC if preferences not found
+            return pytz.UTC
+
+    def _make_aware(self, naive_datetime, timezone):
+        """Helper method to make a naive datetime timezone-aware"""
+        if isinstance(timezone, str):
+            timezone = pytz.timezone(timezone)
+        return timezone.localize(naive_datetime) if hasattr(timezone, 'localize') else pytz.UTC.localize(naive_datetime)
 
 
 class ManagerSerializer(serializers.ModelSerializer):
@@ -240,17 +274,91 @@ class EmployeeSerializer(serializers.ModelSerializer):
             return None
     
 
+class EmployeeScheduleSerializer(OrganizationTimezoneMixin, serializers.ModelSerializer):
+    """
+    Serializer for the EmployeeSchedule model.
+    """
+    class Meta:
+        model = EmployeeSchedule
+        fields = ['id', 'day_of_week', 'shift_start', 'shift_end', 'is_working_day', 'created_at', 'updated_at']
+    
+    def to_representation(self, instance):
+        """
+        Convert UTC times to organization's timezone for display
+        """
+        representation = super().to_representation(instance)
+        
+        # Get timezone from context
+        org_timezone = self.context.get('timezone', pytz.UTC)
+        
+        # Use today's date for conversion
+        today = datetime.now(pytz.UTC).date()
+        
+        # Convert shift times if they exist
+        if representation.get('shift_start'):
+            # Create UTC datetime
+            utc_start = pytz.UTC.localize(
+                datetime.combine(today, instance.shift_start)
+            )
+            # Convert to local time
+            local_start = utc_start.astimezone(org_timezone)
+            representation['shift_start'] = local_start.time().isoformat()
+            
+        if representation.get('shift_end'):
+            # Create UTC datetime
+            utc_end = pytz.UTC.localize(
+                datetime.combine(today, instance.shift_end)
+            )
+            # Convert to local time
+            local_end = utc_end.astimezone(org_timezone)
+            representation['shift_end'] = local_end.time().isoformat()
+        
+        return representation
+
+    def validate(self, data):
+        """Convert local times to UTC and validate schedule."""
+        organization_id = self.context.get('organization_id')
+        org_timezone = self._get_organization_timezone(organization_id)
+        
+        shift_start = data.get('shift_start')
+        shift_end = data.get('shift_end')
+        
+        if shift_start and shift_end:
+            # First validate the times in local timezone
+            if shift_start >= shift_end:
+                raise serializers.ValidationError(_("Shift end time must be after shift start time."))
+            
+            # Convert to UTC
+            # Use today's date for conversion
+            today = datetime.now().date()
+            
+            # Create timezone-aware datetime objects
+            local_start = self._make_aware(datetime.combine(today, shift_start), org_timezone)
+            local_end = self._make_aware(datetime.combine(today, shift_end), org_timezone)
+            
+            # Convert to UTC
+            utc_start = local_start.astimezone(pytz.UTC)
+            utc_end = local_end.astimezone(pytz.UTC)
+            
+            # Update the times in data to UTC
+            data['shift_start'] = utc_start.time()
+            data['shift_end'] = utc_end.time()
+        
+        return data
+
 class EmploymentDetailsSerializer(serializers.ModelSerializer):
     """
     Serializer for the EmploymentDetails model with employment-related information.
     """
     position = serializers.SerializerMethodField(read_only=True)
+    schedules = EmployeeScheduleSerializer(many=True, read_only=True)
+    
     class Meta:
         model = EmploymentDetails
         fields = [
             'position', 'hire_date', 'employment_status', 'salary',
             'shift_start', 'shift_end', 'days_off', 'annual_leave_days',
-            'sick_leave_days', 'created_at', 'updated_at'
+            'sick_leave_days', 'schedules', 'created_at', 'updated_at'
         ]
         
     def validate_days_off(self, value):
@@ -265,29 +373,6 @@ class EmploymentDetailsSerializer(serializers.ModelSerializer):
     def get_position(self, obj):
         """Return the position title from the position object."""
         return obj.position.title if obj.position else None
-    
-    def to_representation(self, instance):
-        """
-        Convert datetime fields to the requested timezone
-        """
-        representation = super().to_representation(instance)
-        
-        # Get timezone from context (set by TimezoneMixin)
-        timezone = self.context.get('timezone', pytz.UTC)
-        
-        # Convert datetime fields
-        datetime_fields = ['created_at', 'updated_at']
-        for field in datetime_fields:
-            if representation.get(field):
-                # Parse the datetime string
-                dt = tz.datetime.fromisoformat(representation[field].replace('Z', '+00:00'))
-                # Use the utility function for conversion
-                converted_dt = convert_datetime_to_timezone(dt, timezone)
-                # Format back to ISO 8601
-                representation[field] = converted_dt.isoformat()
-        
-        return representation
-
 
 class EmployeeWithDetailsSerializer(EmployeeSerializer):
     """
@@ -299,19 +384,23 @@ class EmployeeWithDetailsSerializer(EmployeeSerializer):
         fields = EmployeeSerializer.Meta.fields + ['employment_details']
 
 
-class CreateEmployeeSerializer(serializers.ModelSerializer):
+class CreateEmployeeSerializer(OrganizationTimezoneMixin, serializers.ModelSerializer):
     id = serializers.UUIDField(read_only=True)
     phone_number = PhoneNumberField(validators=[validate_phone.validate_phone])
     position_id = serializers.IntegerField(write_only=True)
     hire_date = serializers.DateField(write_only=True)
     employment_status = serializers.ChoiceField(choices=EmploymentDetails.EMPLOYMENT_STATUS, default='FT', write_only=True)
     salary = serializers.DecimalField(max_digits=10, decimal_places=2, required=True, write_only=True)
-    shift_start = serializers.TimeField(required=True, write_only=True)
-    shift_end = serializers.TimeField(required=True, write_only=True)
+    shift_start = serializers.TimeField(required=False, write_only=True)  # Made optional
+    shift_end = serializers.TimeField(required=False, write_only=True)    # Made optional
     days_off = serializers.JSONField(required=False, allow_null=True, write_only=True)
     annual_leave_days = serializers.IntegerField(default=0, required=False, write_only=True)
     sick_leave_days = serializers.IntegerField(default=0, required=False, write_only=True)
-    
+    schedules = serializers.ListField(
+        child=serializers.DictField(),
+        required=False,
+        write_only=True
+    )
     
     class Meta:
         model = Employee
@@ -320,7 +409,8 @@ class CreateEmployeeSerializer(serializers.ModelSerializer):
             'phone_number', 'address', 'emergency_contact_name', 'emergency_contact_phone',
             # Employment details fields
             'position_id', 'hire_date', 'employment_status', 'salary',
-            'shift_start', 'shift_end', 'days_off', 'annual_leave_days', 'sick_leave_days'
+            'shift_start', 'shift_end', 'days_off', 'annual_leave_days', 'sick_leave_days',
+            'schedules'
         ]
   
     def validate_position_id(self, value):
@@ -339,6 +429,7 @@ class CreateEmployeeSerializer(serializers.ModelSerializer):
         return value
     
     def validate_hire_date(self, value):
+        """Validate hire date against UTC now"""
         if value > tz.now().date():
             raise serializers.ValidationError(_("Hire date cannot be in the future."))
         return value
@@ -349,11 +440,11 @@ class CreateEmployeeSerializer(serializers.ModelSerializer):
         return value
     
     def validate_date_of_birth(self, value):
+        """Validate date of birth against UTC now"""
         today = tz.now().date()
         if value > today:
             raise serializers.ValidationError(_("Date of birth cannot be in the future."))
         
-        # Check if employee is at least 16 years old
         min_age_date = today.replace(year=today.year - 16)
         if value > min_age_date:
             raise serializers.ValidationError(_("Employee must be at least 16 years old."))
@@ -373,19 +464,76 @@ class CreateEmployeeSerializer(serializers.ModelSerializer):
                     raise serializers.ValidationError(_(f"Invalid day '{day}'. Must be one of: {', '.join(valid_days)}"))
         return value
     
+    def validate_schedules(self, value):
+        """Validate the schedule data"""
+        for schedule in value:
+            # Check required fields
+            required_fields = {'day_of_week', 'is_working_day'}
+            if not all(field in schedule for field in required_fields):
+                raise serializers.ValidationError(
+                    _("Each schedule must contain day_of_week and is_working_day")
+                )
+            
+            # Validate day_of_week
+            if schedule['day_of_week'] not in dict(EmployeeSchedule.DAYS_OF_WEEK):
+                raise serializers.ValidationError(
+                    _(f"Invalid day_of_week. Must be one of: {', '.join(dict(EmployeeSchedule.DAYS_OF_WEEK).keys())}")
+                )
+            
+            # If it's a working day, validate shift times
+            if schedule.get('is_working_day'):
+                if 'shift_start' not in schedule or 'shift_end' not in schedule:
+                    raise serializers.ValidationError(
+                        _("Working days must have both shift_start and shift_end times")
+                    )
+                
+                try:
+                    # Parse time strings
+                    shift_start = datetime.strptime(schedule['shift_start'], '%H:%M:%S').time()
+                    shift_end = datetime.strptime(schedule['shift_end'], '%H:%M:%S').time()
+                    
+                    # Update the schedule with parsed times
+                    schedule['shift_start'] = shift_start
+                    schedule['shift_end'] = shift_end
+                except (ValueError, TypeError):
+                    raise serializers.ValidationError(
+                        _("Invalid time format. Use HH:MM:SS format.")
+                    )
+            else:
+                # Remove shift times for non-working days
+                schedule.pop('shift_start', None)
+                schedule.pop('shift_end', None)
+        
+        return value
+    
     def validate(self, data):
-        # Validate shift times if both are provided
-        shift_start = data.get('shift_start') 
+        # Convert shift times from local to UTC
+        organization_id = self.context['organization_id']
+        org_timezone = self._get_organization_timezone(organization_id)
+        
+        shift_start = data.get('shift_start')
         shift_end = data.get('shift_end')
         
-        # If one is provided but not the other, get the existing value from instance
-        if shift_start and not shift_end and self.instance:
-            shift_end = self.instance.shift_end
-        elif shift_end and not shift_start and self.instance:
-            shift_start = self.instance.shift_start
-        
-        if shift_start and shift_end and shift_start >= shift_end:
-            raise serializers.ValidationError(_("Shift end time must be after shift start time."))
+        if shift_start and shift_end:
+            # First validate the times in local timezone
+            if shift_start >= shift_end:
+                raise serializers.ValidationError(_("Shift end time must be after shift start time."))
+            
+            # Convert to UTC
+            # Use today's date for conversion
+            today = datetime.now().date()
+            
+            # Create timezone-aware datetime objects
+            local_start = self._make_aware(datetime.combine(today, shift_start), org_timezone)
+            local_end = self._make_aware(datetime.combine(today, shift_end), org_timezone)
+            
+            # Convert to UTC
+            utc_start = local_start.astimezone(pytz.UTC)
+            utc_end = local_end.astimezone(pytz.UTC)
+            
+            # Update the times in data to UTC
+            data['shift_start'] = utc_start.time()
+            data['shift_end'] = utc_end.time()
         
         # Validate salary against position salary range
         salary = data.get('salary')
@@ -429,13 +577,20 @@ class CreateEmployeeSerializer(serializers.ModelSerializer):
                 employment_details_data['position'] = position
             except Position.DoesNotExist:
                 raise serializers.ValidationError(_("Position does not exist."))
+        
+        # Extract schedules data
+        schedules_data = validated_data.pop('schedules', [])
                 
         with transaction.atomic():
             # Create employee
             employee = Employee.objects.create(organization_id=organization_id, **validated_data)
             
             # Create employment details
-            EmploymentDetails.objects.create(employee=employee, **employment_details_data)
+            employment_details = EmploymentDetails.objects.create(employee=employee, **employment_details_data)
+            
+            # Create schedules if provided
+            for schedule_data in schedules_data:
+                EmployeeSchedule.objects.create(employee=employee, **schedule_data)
         
         return employee
     
@@ -474,17 +629,21 @@ class UpdateEmployeeSerializer(serializers.ModelSerializer):
         return super().update(instance, validated_data)
 
 
-class UpdateEmploymentDetailsSerializer(serializers.ModelSerializer):
+class UpdateEmploymentDetailsSerializer(OrganizationTimezoneMixin, serializers.ModelSerializer):
     position_id = serializers.IntegerField()
-
+    schedules = serializers.ListField(
+        child=serializers.DictField(),
+        required=False
+    )
     
     class Meta:
         model = EmploymentDetails
         fields = [
             'position_id', 'hire_date', 'employment_status', 'salary',
-            'shift_start', 'shift_end', 'days_off', 'annual_leave_days', 'sick_leave_days'
+            'shift_start', 'shift_end', 'days_off', 'annual_leave_days', 'sick_leave_days',
+            'schedules'
         ]
-    
+
     def validate_position_id(self, value):
         organization_id = self.context['organization_id']
         # Check if the position belongs to a department in the current company
@@ -496,6 +655,7 @@ class UpdateEmploymentDetailsSerializer(serializers.ModelSerializer):
         return value
     
     def validate_hire_date(self, value):
+        """Validate hire date against UTC now"""
         if value > tz.now().date():
             raise serializers.ValidationError(_("Hire date cannot be in the future."))
         return value
@@ -518,19 +678,82 @@ class UpdateEmploymentDetailsSerializer(serializers.ModelSerializer):
                     raise serializers.ValidationError(_(f"Invalid day '{day}'. Must be one of: {', '.join(valid_days)}"))
         return value
     
+    def validate_schedules(self, value):
+        """Validate the schedule data"""
+        for schedule in value:
+            # Check required fields
+            required_fields = {'day_of_week', 'is_working_day'}
+            if not all(field in schedule for field in required_fields):
+                raise serializers.ValidationError(
+                    _("Each schedule must contain day_of_week and is_working_day")
+                )
+            
+            # Validate day_of_week
+            if schedule['day_of_week'] not in dict(EmployeeSchedule.DAYS_OF_WEEK):
+                raise serializers.ValidationError(
+                    _(f"Invalid day_of_week. Must be one of: {', '.join(dict(EmployeeSchedule.DAYS_OF_WEEK).keys())}")
+                )
+            
+            # If it's a working day, validate shift times
+            if schedule.get('is_working_day'):
+                if 'shift_start' not in schedule or 'shift_end' not in schedule:
+                    raise serializers.ValidationError(
+                        _("Working days must have both shift_start and shift_end times")
+                    )
+                
+                try:
+                    # Parse time strings
+                    shift_start = datetime.strptime(schedule['shift_start'], '%H:%M:%S').time()
+                    shift_end = datetime.strptime(schedule['shift_end'], '%H:%M:%S').time()
+                    
+                    # Update the schedule with parsed times
+                    schedule['shift_start'] = shift_start
+                    schedule['shift_end'] = shift_end
+                except (ValueError, TypeError):
+                    raise serializers.ValidationError(
+                        _("Invalid time format. Use HH:MM:SS format.")
+                    )
+            else:
+                # Remove shift times for non-working days
+                schedule.pop('shift_start', None)
+                schedule.pop('shift_end', None)
+        
+        return value
+
     def validate(self, data):
-        # Validate shift times if both are provided
-        shift_start = data.get('shift_start') 
+        # Convert shift times from local to UTC
+        organization_id = self.context['organization_id']
+        org_timezone = self._get_organization_timezone(organization_id)
+        
+        shift_start = data.get('shift_start')
         shift_end = data.get('shift_end')
         
-        # If one is provided but not the other, get the existing value from instance
+        # If one is provided but not the other, get the existing value
         if shift_start and not shift_end and self.instance:
             shift_end = self.instance.shift_end
         elif shift_end and not shift_start and self.instance:
             shift_start = self.instance.shift_start
         
-        if shift_start and shift_end and shift_start >= shift_end:
-            raise serializers.ValidationError(_("Shift end time must be after shift start time."))
+        if shift_start and shift_end:
+            # First validate the times in local timezone
+            if shift_start >= shift_end:
+                raise serializers.ValidationError(_("Shift end time must be after shift start time."))
+            
+            # Convert to UTC
+            # Use today's date for conversion
+            today = datetime.now().date()
+            
+            # Create timezone-aware datetime objects in organization's timezone
+            local_start = org_timezone.localize(datetime.combine(today, shift_start))
+            local_end = org_timezone.localize(datetime.combine(today, shift_end))
+            
+            # Convert to UTC
+            utc_start = local_start.astimezone(pytz.UTC)
+            utc_end = local_end.astimezone(pytz.UTC)
+            
+            # Update the times in data to UTC
+            data['shift_start'] = utc_start.time()
+            data['shift_end'] = utc_end.time()
         
         # Validate salary against position salary range
         salary = data.get('salary')
@@ -553,29 +776,66 @@ class UpdateEmploymentDetailsSerializer(serializers.ModelSerializer):
         return data
     
     def update(self, instance, validated_data):
-        return super().update(instance, validated_data)
+        schedules_data = validated_data.pop('schedules', [])
+        
+        # Update employment details
+        instance = super().update(instance, validated_data)
+        
+        # Update schedules
+        if schedules_data:
+            # Delete existing schedules
+            instance.employee.schedules.all().delete()
+            # Create new schedules
+            for schedule_data in schedules_data:
+                EmployeeSchedule.objects.create(employee=instance.employee, **schedule_data)
+        
+        return instance
         
         
 # ================== Attendance serializers =========================
 
-class AttendanceSerializer(serializers.ModelSerializer):
+class AttendanceSerializer(OrganizationTimezoneMixin, serializers.ModelSerializer):
     """
     Serializer for the Attendance model with employee attendance information.
     """
     employee_name = serializers.SerializerMethodField()
+    time_in_local = serializers.SerializerMethodField()
+    time_out_local = serializers.SerializerMethodField()
 
     class Meta:
         model = Attendance
-        fields = ['id', 'employee', 'employee_name', 'date', 'time_in', 'time_out', 'status',
-                ]
+        fields = ['id', 'employee', 'employee_name', 'date', 'time_in', 'time_out', 
+                 'time_in_local', 'time_out_local', 'status']
     
+    def get_time_in_local(self, obj):
+        """Convert UTC time_in to organization's local time"""
+        if not obj.time_in:
+            return None
+            
+        org_timezone = self._get_organization_timezone(obj.organization_id)
+        utc_dt = datetime.combine(obj.date, obj.time_in)
+        utc_dt = pytz.UTC.localize(utc_dt)
+        local_dt = utc_dt.astimezone(org_timezone)
+        return local_dt.time()
+
+    def get_time_out_local(self, obj):
+        """Convert UTC time_out to organization's local time"""
+        if not obj.time_out:
+            return None
+            
+        org_timezone = self._get_organization_timezone(obj.organization_id)
+        utc_dt = datetime.combine(obj.date, obj.time_out)
+        utc_dt = pytz.UTC.localize(utc_dt)
+        local_dt = utc_dt.astimezone(org_timezone)
+        return local_dt.time()
+
     def get_employee_name(self, obj):
         """Get the full name of the employee."""
         return f"{obj.employee.first_name} {obj.employee.last_name}"
     
     
 
-class CheckInOutSerializer(serializers.Serializer):
+class CheckInOutSerializer(OrganizationTimezoneMixin, serializers.Serializer):
     """
     Serializer for handling employee check-in and check-out operations.
     This serializer handles both creating new attendance records (check-in)
@@ -595,96 +855,97 @@ class CheckInOutSerializer(serializers.Serializer):
         
         return value
     
-    def _get_organization_timezone(self, organization_id):
-        """
-        Helper method to get the organization's timezone.
-        Uses caching to reduce database queries.
-        """
-        cache_key = f"org_timezone_{organization_id}"
-        cached_timezone = cache.get(cache_key)
-        
-        if cached_timezone:
-            return cached_timezone
-        
-        try:
-            org_preferences = Preference.objects.select_related('organization').get(
-                organization_id=organization_id
-            )
-            organization_timezone = org_preferences.timezone
-            
-            # Cache the timezone for 1 hour (3600 seconds)
-            cache.set(cache_key, organization_timezone, 3600)
-            
-            return organization_timezone
-        except Preference.DoesNotExist:
-            # Default to UTC if preferences not found
-            return pytz.UTC
+    def _get_current_datetime(self):
+        """Helper method to get the current UTC datetime."""
+        return tz.now()
     
-    def _get_current_datetime(self, organization_id):
-        """
-        Helper method to get the current date and time in the organization's timezone.
-        """
-        organization_timezone = self._get_organization_timezone(organization_id)
-        
-        current_datetime = tz.now()
-        if organization_timezone != pytz.UTC:
-            current_datetime = current_datetime.astimezone(organization_timezone)
-        
-        return current_datetime
-    
-    def _handle_check_in(self, employee_id, current_date, current_time, note, organization_id):
+    def _handle_check_in(self, employee_id, current_datetime, note, organization_id):
         """
         Helper method to handle employee check-in.
         Creates a new attendance record with appropriate status.
         """
         employee = Employee.objects.get(id=employee_id)
         
-        # Get employment details to determine status and validate check-in time
+        # Get the day of week for the current date
+        day_of_week = current_datetime.strftime('%A').upper()
+        
         try:
-            employment_details = EmploymentDetails.objects.get(employee_id=employee_id)
+            # First try to get the schedule for this specific day
+            schedule = employee.schedules.get(day_of_week=day_of_week)
             
-            # Prevent check-in if shift period is not defined
-            if employment_details.shift_start is None or employment_details.shift_end is None:
+            if not schedule.is_working_day:
                 raise serializers.ValidationError(_(
-                    "You cannot check in because your shift period is not defined. Please contact an administrator."
+                    f"You cannot check in because {day_of_week} is not a working day for you."
                 ))
             
+            # Convert current UTC time to organization's timezone for comparison
+            org_timezone = self._get_organization_timezone(organization_id)
+            local_datetime = current_datetime.astimezone(org_timezone)
+            local_time = local_datetime.time()
+            
             # Prevent check-in after shift end time
-            if current_time > employment_details.shift_end:
+            if local_time > schedule.shift_end:
                 raise serializers.ValidationError(_(
                     "You cannot check in after your scheduled shift end time. Please contact an administrator."
                 ))
             
             # Determine status based on shift start time
             status = Attendance.ATTENDANCE_ON_TIME
-            if employment_details.shift_start:
-                # Add a 15-minute grace period for lateness determination
-                # An employee is considered late if they check in more than 15 minutes
-                # after their scheduled shift start time
+            if schedule.shift_start:
                 from datetime import datetime, timedelta
                 
                 # Convert shift_start to datetime for easier manipulation
-                shift_start_dt = datetime.combine(current_date, employment_details.shift_start)
+                shift_start_dt = datetime.combine(local_datetime.date(), schedule.shift_start)
                 late_threshold_dt = shift_start_dt + timedelta(minutes=15)
-                
-                # Extract time component
                 late_threshold = late_threshold_dt.time()
                 
-                # Check if employee is late (beyond grace period)
-                if current_time > late_threshold:
+                if local_time > late_threshold:
                     status = Attendance.ATTENDANCE_LATE
+                    
+        except EmployeeSchedule.DoesNotExist:
+            # If no specific schedule exists, fall back to employment details
+            try:
+                employment_details = employee.employment_details
                 
-        except EmploymentDetails.DoesNotExist:
-            # If no employment details exist, employee cannot check in
-            raise serializers.ValidationError(_(
-                "You cannot check in because you don't have employment details recorded. Please contact an administrator."
-            ))
+                if employment_details.shift_start is None or employment_details.shift_end is None:
+                    raise serializers.ValidationError(_(
+                        "You cannot check in because your shift period is not defined. Please contact an administrator."
+                    ))
+                
+                # Convert current UTC time to organization's timezone for comparison
+                org_timezone = self._get_organization_timezone(organization_id)
+                local_datetime = current_datetime.astimezone(org_timezone)
+                local_time = local_datetime.time()
+                
+                # Prevent check-in after shift end time
+                if local_time > employment_details.shift_end:
+                    raise serializers.ValidationError(_(
+                        "You cannot check in after your scheduled shift end time. Please contact an administrator."
+                    ))
+                
+                # Determine status based on shift start time
+                status = Attendance.ATTENDANCE_ON_TIME
+                if employment_details.shift_start:
+                    from datetime import datetime, timedelta
+                    
+                    # Convert shift_start to datetime for easier manipulation
+                    shift_start_dt = datetime.combine(local_datetime.date(), employment_details.shift_start)
+                    late_threshold_dt = shift_start_dt + timedelta(minutes=15)
+                    late_threshold = late_threshold_dt.time()
+                    
+                    if local_time > late_threshold:
+                        status = Attendance.ATTENDANCE_LATE
+                        
+            except EmploymentDetails.DoesNotExist:
+                raise serializers.ValidationError(_(
+                    "You cannot check in because you don't have employment details recorded. Please contact an administrator."
+                ))
         
-        # Create new attendance record
+        # Create new attendance record using UTC datetime
         attendance = Attendance.objects.create(
             employee=employee,
-            date=current_date,
-            time_in=current_time,
+            date=current_datetime.date(),  # Store UTC date
+            time_in=current_datetime.time(),  # Store UTC time
             status=status,
             note=note,
             organization_id=organization_id
@@ -692,45 +953,61 @@ class CheckInOutSerializer(serializers.Serializer):
         
         return attendance
     
-    def _handle_check_out(self, attendance, current_time, note, employee_id):
+    def _handle_check_out(self, attendance, current_datetime, note, employee_id):
         """
         Helper method to handle employee check-out.
         Updates the existing attendance record with check-out time.
         """
-        # Get employment details to check shift end time
+        # Get the day of week for the attendance date
+        day_of_week = attendance.date.strftime('%A').upper()
+        
         try:
-            employment_details = EmploymentDetails.objects.get(employee_id=employee_id)
+            # First try to get the schedule for this specific day
+            schedule = attendance.employee.schedules.get(day_of_week=day_of_week)
             
-            # If employee is trying to check out before their shift end time
-            if employment_details.shift_end and current_time < employment_details.shift_end:
-                # Prevent early checkout - only admins can do this
+            # Convert current UTC time to organization's timezone for comparison
+            org_timezone = self._get_organization_timezone(attendance.organization_id)
+            local_datetime = current_datetime.astimezone(org_timezone)
+            local_time = local_datetime.time()
+            
+            if schedule.shift_end and local_time < schedule.shift_end:
                 raise serializers.ValidationError(_(
                     "You cannot check out before your scheduled end time. Please contact an administrator."
                 ))
                 
-            # Calculate work duration to update status if needed
-            from datetime import datetime, date, timedelta
-            
-            # Create datetime objects for comparison
-            dummy_date = date(2000, 1, 1)  # Use any date
-            dt_in = datetime.combine(dummy_date, attendance.time_in)
-            dt_out = datetime.combine(dummy_date, current_time)
-            
-            # If time_out is earlier than time_in (overnight shift), add a day to time_out
-            if dt_out < dt_in:
-                dt_out = datetime.combine(dummy_date + timedelta(days=1), current_time)
-            
-            # Calculate duration in hours
-            duration = (dt_out - dt_in).total_seconds() / 3600
+        except EmployeeSchedule.DoesNotExist:
+            # If no specific schedule exists, fall back to employment details
+            try:
+                employment_details = attendance.employee.employment_details
                 
-        except EmploymentDetails.DoesNotExist:
-            # If no employment details, allow checkout
-            pass
+                # Convert current UTC time to organization's timezone for comparison
+                org_timezone = self._get_organization_timezone(attendance.organization_id)
+                local_datetime = current_datetime.astimezone(org_timezone)
+                local_time = local_datetime.time()
+                
+                if employment_details.shift_end and local_time < employment_details.shift_end:
+                    raise serializers.ValidationError(_(
+                        "You cannot check out before your scheduled end time. Please contact an administrator."
+                    ))
+                    
+            except EmploymentDetails.DoesNotExist:
+                pass
         
-        # Update time_out
-        attendance.time_out = current_time
+        # Calculate work duration using UTC times
+        from datetime import datetime, date, timedelta
         
-        # Update note if provided
+        dummy_date = date(2000, 1, 1)
+        dt_in = datetime.combine(dummy_date, attendance.time_in)
+        dt_out = datetime.combine(dummy_date, current_datetime.time())
+        
+        if dt_out < dt_in:
+            dt_out = datetime.combine(dummy_date + timedelta(days=1), current_datetime.time())
+        
+        duration = (dt_out - dt_in).total_seconds() / 3600
+        
+        # Update time_out with UTC time
+        attendance.time_out = current_datetime.time()
+        
         if note:
             attendance.note = note
             
@@ -745,41 +1022,62 @@ class CheckInOutSerializer(serializers.Serializer):
         note = self.validated_data.get('note', '')
         organization_id = self.context.get('organization_id')
         
-        # Get current date and time in the organization's timezone
-        current_datetime = self._get_current_datetime(organization_id)
-        current_date = current_datetime.date()
-        current_time = current_datetime.time()
+        # Get current UTC datetime
+        current_datetime = self._get_current_datetime()
         
-        # Check if attendance record exists for today
+        # Check if attendance record exists for today (using UTC date)
         try:
-            attendance = Attendance.objects.get(employee_id=employee_id, date=current_date)
+            attendance = Attendance.objects.get(
+                employee_id=employee_id, 
+                date=current_datetime.date()
+            )
             
-            # If time_out is already set, employee has already checked out
             if attendance.time_out is not None:
                 raise serializers.ValidationError(_("Employee has already checked out today."))
             
-            # Handle check-out
-            return self._handle_check_out(attendance, current_time, note, employee_id)
+            return self._handle_check_out(attendance, current_datetime, note, employee_id)
             
         except Attendance.DoesNotExist:
-            # No attendance record exists, handle check-in
-            return self._handle_check_in(employee_id, current_date, current_time, note, organization_id)
+            return self._handle_check_in(employee_id, current_datetime, note, organization_id)
 
 
-class AdminAttendanceSerializer(serializers.ModelSerializer):
+class AdminAttendanceSerializer(OrganizationTimezoneMixin, serializers.ModelSerializer):
     """
     Serializer for administrators to manage attendance records.
-    Allows full control over all attendance fields.
     """
+    time_in = serializers.TimeField(required=False)
+    time_out = serializers.TimeField(required=False)
+
     class Meta:
         model = Attendance
         fields = ['id', 'employee', 'date', 'time_in', 'time_out', 'status', 'note']
     
     def validate(self, data):
-        """Validate attendance data, ensuring time_out is after time_in."""
-        # Ensure time_out is after time_in if both are provided
-        if data.get('time_out') and data.get('time_in') and data['time_out'] <= data['time_in']:
-            raise serializers.ValidationError(_("Check-out time must be after check-in time."))
+        """Convert any local times to UTC before validation"""
+        organization_id = self.context.get('organization_id')
+        org_timezone = self._get_organization_timezone(organization_id)
+        
+        # Convert time_in and time_out to UTC if provided
+        time_in = data.get('time_in')
+        time_out = data.get('time_out')
+        date = data.get('date') or (self.instance.date if self.instance else None)
+
+        if time_in:
+            # Create local datetime and convert to UTC
+            local_dt = self._make_aware(datetime.combine(date, time_in), org_timezone)
+            utc_dt = local_dt.astimezone(pytz.UTC)
+            data['time_in'] = utc_dt.time()
+
+        if time_out:
+            # Create local datetime and convert to UTC
+            local_dt = self._make_aware(datetime.combine(date, time_out), org_timezone)
+            utc_dt = local_dt.astimezone(pytz.UTC)
+            data['time_out'] = utc_dt.time()
+
+        # Validate times in UTC
+        if data.get('time_out') and data.get('time_in'):
+            if data['time_out'] <= data['time_in']:
+                raise serializers.ValidationError(_("Check-out time must be after check-in time."))
         
         # If status is being updated to 'half_day', validate work duration
         if data.get('status') == 'half_day' and data.get('time_in') and data.get('time_out'):

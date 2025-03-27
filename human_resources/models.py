@@ -19,10 +19,12 @@ def generate_unique_employee_id():
 
 class Department(models.Model):
     organization = models.ForeignKey(Organization, related_name='departments', on_delete=models.CASCADE)
-    name = models.CharField(max_length=100, validators=[MinLengthValidator(2)],  unique=True)
+    name = models.CharField(max_length=100, validators=[MinLengthValidator(2)])
     description = models.TextField(blank=True, null=True)
     manager = models.ForeignKey('Employee', on_delete=models.SET_NULL, null=True, blank=True, related_name='managed_department')
     image_url = models.URLField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
 
     class Meta:
@@ -43,12 +45,14 @@ class Department(models.Model):
             raise ValidationError("Manager must belong to the same organization")
 
 class Position(models.Model):
-    title = models.CharField(max_length=100, validators=[MinLengthValidator(3)],  unique=True)
+    title = models.CharField(max_length=100, validators=[MinLengthValidator(3)])
     organization = models.ForeignKey(Organization, related_name='positions', on_delete=models.CASCADE)
     department = models.ForeignKey(Department, on_delete=models.CASCADE, related_name='positions')
     description = models.TextField(blank=True, null=True)
     salary_range_min = models.DecimalField(max_digits=10, decimal_places=2)
     salary_range_max = models.DecimalField(max_digits=10, decimal_places=2)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         indexes = [
@@ -56,7 +60,7 @@ class Position(models.Model):
             models.Index(fields=['title']),
         ]
         constraints = [
-            models.UniqueConstraint(fields=['organization', 'title'], name='unique_position_per_organization'),
+            models.UniqueConstraint(fields=['organization', 'title', 'department'], name='unique_position_per_organization'),
 
             models.CheckConstraint(
                 condition=models.Q(salary_range_max__gte=models.F('salary_range_min')),
@@ -128,8 +132,8 @@ class EmploymentDetails(models.Model):
     hire_date = models.DateField()
     employment_status = models.CharField(max_length=2, choices=EMPLOYMENT_STATUS, default='FT')
     salary = models.DecimalField(max_digits=10, decimal_places=2)
-    shift_start = models.TimeField()
-    shift_end = models.TimeField()
+    shift_start = models.TimeField(null=True, blank=True)
+    shift_end = models.TimeField(null=True, blank=True)
     days_off = models.JSONField(default=list, blank=True, null=True)
     annual_leave_days = models.PositiveIntegerField(default=0)
     sick_leave_days = models.PositiveIntegerField(default=0)
@@ -146,7 +150,9 @@ class EmploymentDetails(models.Model):
         ]
         constraints = [
             models.CheckConstraint(
-                condition=models.Q(shift_end__gt=models.F('shift_start')),
+                condition=models.Q(shift_end__gt=models.F('shift_start')) | 
+                         models.Q(shift_start__isnull=True) | 
+                         models.Q(shift_end__isnull=True),
                 name='shift_end_after_start'
             ),
             models.CheckConstraint(
@@ -165,6 +171,59 @@ class EmploymentDetails(models.Model):
             raise ValidationError("Position must belong to employee's organization")
         if self.salary < self.position.salary_range_min or self.salary > self.position.salary_range_max:
             raise ValidationError("Salary must be within position's range")
+
+class EmployeeSchedule(models.Model):
+    DAYS_OF_WEEK = (
+        ('MONDAY', 'Monday'),
+        ('TUESDAY', 'Tuesday'),
+        ('WEDNESDAY', 'Wednesday'),
+        ('THURSDAY', 'Thursday'),
+        ('FRIDAY', 'Friday'),
+        ('SATURDAY', 'Saturday'),
+        ('SUNDAY', 'Sunday'),
+    )
+    
+    employee = models.ForeignKey(Employee, on_delete=models.CASCADE, related_name='schedules')
+    day_of_week = models.CharField(max_length=10, choices=DAYS_OF_WEEK)
+    shift_start = models.TimeField(null=True, blank=True)
+    shift_end = models.TimeField(null=True, blank=True)
+    is_working_day = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        indexes = [
+            models.Index(fields=['employee']),
+            models.Index(fields=['day_of_week']),
+            models.Index(fields=['is_working_day']),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['employee', 'day_of_week'],
+                name='unique_schedule_per_day'
+            ),
+            models.CheckConstraint(
+                condition=models.Q(shift_end__gt=models.F('shift_start')),
+                name='schedule_end_after_start'
+            )
+        ]
+    
+    def __str__(self):
+        return f"{self.employee.first_name} - {self.day_of_week} ({self.shift_start} to {self.shift_end})"
+
+    def clean(self):
+        if not self.is_working_day and (self.shift_start or self.shift_end):
+            raise ValidationError("Non-working days should not have shift times")
+
+@receiver(pre_save, sender=EmployeeSchedule)
+def validate_schedule(sender, instance, **kwargs):
+    # Check if the day is marked as a day off in EmploymentDetails
+    try:
+        employment_details = instance.employee.employment_details
+        if employment_details.days_off and instance.day_of_week in employment_details.days_off:
+            raise ValidationError(f"Cannot create schedule for {instance.day_of_week} as it's marked as a day off")
+    except EmploymentDetails.DoesNotExist:
+        pass
 
 class Attendance(models.Model):
     ATTENDANCE_ON_TIME = 'O'
@@ -212,9 +271,29 @@ class Attendance(models.Model):
     def clean(self):
         if self.employee.organization != self.organization:
             raise ValidationError("Employee must belong to the organization")
-        if self.time_in and self.employee.employment_details.shift_start:
-            if self.time_in < self.employee.employment_details.shift_start:
-                raise ValidationError("Time in must be after shift start")
+        
+        # Get the day of week for the attendance date
+        day_of_week = self.date.strftime('%A').upper()
+        
+        try:
+            # First try to get the schedule for this specific day
+            schedule = self.employee.schedules.get(day_of_week=day_of_week)
+            
+            if not schedule.is_working_day:
+                raise ValidationError(f"{day_of_week} is not a working day for this employee")
+                
+            if self.time_in and schedule.shift_start:
+                if self.time_in < schedule.shift_start:
+                    raise ValidationError(f"Time in must be after shift start time ({schedule.shift_start})")
+                    
+        except EmployeeSchedule.DoesNotExist:
+            # If no specific schedule exists, fall back to employment details
+            try:
+                employment_details = self.employee.employment_details
+                if employment_details.shift_start and self.time_in < employment_details.shift_start:
+                    raise ValidationError(f"Time in must be after shift start time ({employment_details.shift_start})")
+            except EmploymentDetails.DoesNotExist:
+                pass
 
 @receiver(pre_save, sender=Attendance)
 def validate_attendance(sender, instance, **kwargs):

@@ -15,10 +15,29 @@ class StatisticsCalculator:
             department = position.department.name if position and position.department else "N/A"
             position_title = position.title if position else "N/A"
             days_off = employment_details.days_off or []
-            shift_start = employment_details.shift_start
-
-            # Get employee-specific expected hours
-            if employment_details.shift_start and employment_details.shift_end:
+            
+            # Get employee-specific expected hours based on schedules
+            schedules = employee.schedules.all()
+            if schedules.exists():
+                # Calculate average expected hours from schedules
+                total_hours = 0
+                working_days = 0
+                for schedule in schedules:
+                    if schedule.is_working_day:
+                        shift_start_dt = datetime.combine(date.today(), schedule.shift_start)
+                        shift_end_dt = datetime.combine(date.today(), schedule.shift_end)
+                        
+                        # Handle overnight shifts
+                        if shift_end_dt < shift_start_dt:
+                            shift_end_dt = datetime.combine(date.today() + timedelta(days=1), schedule.shift_end)
+                        
+                        total_hours += (shift_end_dt - shift_start_dt).total_seconds() / 3600
+                        working_days += 1
+                
+                if working_days > 0:
+                    expected_work_hours = total_hours / working_days
+            elif employment_details.shift_start and employment_details.shift_end:
+                # Fall back to employment details if no schedules exist
                 shift_start_dt = datetime.combine(date.today(), employment_details.shift_start)
                 shift_end_dt = datetime.combine(date.today(), employment_details.shift_end)
                 
@@ -31,7 +50,6 @@ class StatisticsCalculator:
         except AttributeError:
             department = position_title = "N/A"
             days_off = []
-            shift_start = None
 
         # Calculate basic statistics
         stats = StatisticsCalculator._calculate_basic_stats(attendance_records)
@@ -41,7 +59,7 @@ class StatisticsCalculator:
         
         # Calculate time-based statistics
         time_stats = StatisticsCalculator._calculate_time_stats(
-            attendance_records, shift_start, expected_work_hours)
+            attendance_records, employee, expected_work_hours)
         
         # Calculate attendance score
         attendance_score = AttendanceCalculator.calculate_attendance_score(
@@ -83,37 +101,49 @@ class StatisticsCalculator:
         }
 
     @staticmethod
-    def _calculate_time_stats(attendance_records, shift_start, expected_hours):
+    def _calculate_time_stats(attendance_records, employee, expected_hours):
         """Calculate time-based statistics."""
         total_minutes_late = 0
         total_working_hours = 0
         count_with_complete_hours = 0
 
-        # Calculate late minutes if shift start is defined
-        if shift_start:
-            for attendance in (a for a in attendance_records if a.status == 'LATE'):
-                time_in = datetime.combine(date.today(), attendance.time_in)
-                expected_time = datetime.combine(date.today(), shift_start)
-                
-                # Add 15-minute grace period
-                expected_time = expected_time + timedelta(minutes=15)
-                
-                if time_in > expected_time:
-                    minutes_late = (time_in - expected_time).total_seconds() / 60
-                    total_minutes_late += minutes_late
+        # Calculate late minutes and working hours
+        for attendance in attendance_records:
+            if attendance.status == 'LATE':
+                day_of_week = attendance.date.strftime('%A').upper()
+                try:
+                    # Try to get schedule for this specific day
+                    schedule = employee.schedules.get(day_of_week=day_of_week)
+                    expected_time = schedule.shift_start
+                except:
+                    # Fall back to employment details
+                    try:
+                        expected_time = employee.employment_details.shift_start
+                    except:
+                        continue
 
-        # Calculate working hours
-        for attendance in (a for a in attendance_records if a.time_out is not None):
-            time_in = datetime.combine(date.today(), attendance.time_in)
-            time_out = datetime.combine(date.today(), attendance.time_out)
-            
-            # Handle overnight shifts
-            if time_out < time_in:
-                time_out = datetime.combine(date.today() + timedelta(days=1), attendance.time_out)
-            
-            working_hours = (time_out - time_in).total_seconds() / 3600
-            total_working_hours += working_hours
-            count_with_complete_hours += 1
+                if expected_time:
+                    time_in = datetime.combine(date.today(), attendance.time_in)
+                    expected_dt = datetime.combine(date.today(), expected_time)
+                    
+                    # Add 15-minute grace period
+                    expected_dt = expected_dt + timedelta(minutes=15)
+                    
+                    if time_in > expected_dt:
+                        minutes_late = (time_in - expected_dt).total_seconds() / 60
+                        total_minutes_late += minutes_late
+
+            if attendance.time_out is not None:
+                time_in = datetime.combine(date.today(), attendance.time_in)
+                time_out = datetime.combine(date.today(), attendance.time_out)
+                
+                # Handle overnight shifts
+                if time_out < time_in:
+                    time_out = datetime.combine(date.today() + timedelta(days=1), attendance.time_out)
+                
+                working_hours = (time_out - time_in).total_seconds() / 3600
+                total_working_hours += working_hours
+                count_with_complete_hours += 1
 
         return {
             'total_minutes_late': total_minutes_late,
