@@ -4,9 +4,7 @@ from .serializers import(
 
 )
 from core.mixins import TimezoneMixin
-from core.models import Permission
 from django.utils.translation import gettext as _
-from rest_framework.exceptions import PermissionDenied
 from .serializers import CheckInOutSerializer, Attendance, AttendanceSerializer
 from rest_framework.response import Response
 from rest_framework import status
@@ -22,9 +20,8 @@ from core.pagination import DefaultPagination
 from rest_framework import  filters
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.views import APIView
-from django.db.models import Count, Q
 
-from .utils.statistics_calculator import StatisticsCalculator
+
 from .serializers import EmployeeAttendanceStatsSerializer
 from django.db import models
     
@@ -96,6 +93,8 @@ class DepartmentModelViewset(ModelViewSet):
         # If no employees, proceed with deletion
         self.perform_destroy(instance)
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
 
 class PositionModelViewset(ModelViewSet):
     pagination_class = DefaultPagination
@@ -186,6 +185,7 @@ class AttendanceModelViewset(TimezoneMixin, ModelViewSet):
         context = super().get_serializer_context()
         context['organization_id'] = self.kwargs['organization_pk']
         return context
+    
     
     def get_organization_timezone(self):
         """
@@ -279,342 +279,4 @@ class AttendanceModelViewset(TimezoneMixin, ModelViewSet):
         
         return Response(response_data, status=status.HTTP_201_CREATED)
 
-
-
-# Attendance Reports
-class BaseAttendanceReportView(APIView):
-    """Base class for attendance report views with common functionality."""
-    
-    def get_date_range(self, request):
-        """
-        Get and validate date range from request parameters.
-        Returns (start_date, end_date) tuple if valid, or None, None if not specified/invalid.
-        """
-        start_date_param = request.query_params.get('start_date', '')
-        end_date_param = request.query_params.get('end_date', '')
-
-        # Handle null, undefined, or empty string cases
-        if not start_date_param or start_date_param.lower() in ['null', 'undefined', '']:
-            start_date_param = None
-        if not end_date_param or end_date_param.lower() in ['null', 'undefined', '']:
-            end_date_param = None
-
-        # If no valid dates provided, return None to skip date filtering
-        if start_date_param is None and end_date_param is None:
-            return None, None
-
-        try:
-            # Parse dates if provided
-            start_date = datetime.fromisoformat(start_date_param).date() if start_date_param else None
-            end_date = datetime.fromisoformat(end_date_param).date() if end_date_param else None
-
-            # Validate date range if both dates are provided
-            if start_date and end_date and start_date > end_date:
-                return Response(
-                    {"error": "Start date cannot be after end date."},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-
-            return start_date, end_date
-
-        except ValueError:
-            return Response(
-                {"error": "Invalid date format. Use YYYY-MM-DD format."},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-            
-    def get_filtered_queryset(self, organization_pk, start_date, end_date, department_id=None):
-        """
-        Get filtered queryset based on date range and department.
-        Date filtering is only applied if both dates are provided.
-        """
-        queryset = Attendance.objects.select_related(
-            'employee',
-            'employee__employment_details',
-            'employee__employment_details__position',
-            'employee__employment_details__position__department'
-        ).filter(organization_id=organization_pk)
-        
-        # Only apply date filtering if both dates are provided and not None
-        if start_date is not None and end_date is not None:
-            queryset = queryset.filter(
-            date__gte=start_date,
-            date__lte=end_date
-        )
-        
-        if department_id:
-            queryset = queryset.filter(
-                employee__employment_details__position__department_id=department_id
-            )
-        
-        return queryset
-    
-    def get_employees_queryset(self, organization_pk, start_date, end_date, department_id=None):
-        """
-        Get all employees in the organization, regardless of attendance records.
-        """
-        employees_queryset = Employee.objects.select_related(
-            'employment_details',
-            'employment_details__position',
-            'employment_details__position__department'
-        ).filter(organization_id=organization_pk)
-
-        if department_id:
-            employees_queryset = employees_queryset.filter(
-                employment_details__position__department_id=department_id
-            )
-        
-        return employees_queryset.distinct()
-    
-    def calculate_working_days(self, start_date, end_date, days_off):
-        """
-        Calculate working days between two dates, excluding specified days off.
-        Returns 0 if either date is None.
-        """
-        # Return 0 if either date is None
-        if start_date is None or end_date is None:
-            return 0
-        
-        # This method is already optimized
-        working_days = 0
-        current_date = start_date
-        while current_date <= end_date:
-            day_name = current_date.strftime('%A').upper()
-            if day_name not in days_off:
-                working_days += 1
-            current_date += timedelta(days=1)
-        return working_days
-
-
-class EmployeeAttendanceReportView(BaseAttendanceReportView):
-    """
-    Generate attendance reports for individual employees with attendance scoring.
-    Includes pagination for handling large employee datasets.
-    """
-    pagination_class = DefaultPagination
-    
-    def _load_attendance_records(self, attendance_queryset, start_date, end_date):
-        """
-        Load and map attendance records by employee ID.
-        """
-        employee_attendance_map = {}
-        base_attendance_query = attendance_queryset
-        
-        # Only apply date filtering if both dates are provided
-        if start_date is not None and end_date is not None:
-            base_attendance_query = base_attendance_query.filter(
-                date__gte=start_date,
-                date__lte=end_date
-            )
-        
-        for attendance in base_attendance_query:
-            if attendance.employee_id not in employee_attendance_map:
-                employee_attendance_map[attendance.employee_id] = []
-            employee_attendance_map[attendance.employee_id].append(attendance)
-            
-        return employee_attendance_map
-    
-    def _generate_paginated_response(self, employee_stats, start_date, end_date, request):
-        """
-        Generate paginated response with report data.
-        """
-        paginator = self.pagination_class()
-        paginated_stats = paginator.paginate_queryset(employee_stats, request)
-        
-        # Calculate total days in the period
-        total_days = (end_date - start_date).days + 1 if start_date and end_date else None
-        
-        # Generate the report with paginated data
-        report = {
-            'report_period': {
-                'start_date': start_date.isoformat() if start_date else None,
-                'end_date': end_date.isoformat() if end_date else None,
-                'total_days': total_days,
-            },
-            'employee_statistics': paginated_stats,
-        }
-        
-        return paginator.get_paginated_response(report)
-    
-    def get(self, request, organization_pk):
-        # Get date range and department filter
-        date_range = self.get_date_range(request)
-        if isinstance(date_range, Response):  # Error occurred
-            return date_range
-        
-        start_date, end_date = date_range
-        department_id = request.query_params.get('department_id')
-        
-        # Get filtered querysets with eager loading
-        attendance_queryset = self.get_filtered_queryset(
-            organization_pk, start_date, end_date, department_id)
-        employees_queryset = self.get_employees_queryset(
-            organization_pk, start_date, end_date, department_id)
-        
-        # Load attendance records
-        employee_attendance_map = self._load_attendance_records(
-            attendance_queryset, start_date, end_date)
-        
-        # Calculate statistics for each employee
-        employee_stats = [
-            StatisticsCalculator.calculate_employee_statistics(
-                employee,
-                employee_attendance_map.get(employee.id, []),
-                start_date,
-                end_date
-            )
-            for employee in employees_queryset
-        ]
-        
-        # Paginate and return response
-        return self._generate_paginated_response(
-            employee_stats, start_date, end_date, request)
-
-class EmployeeAttendanceStatsViewSet(ModelViewSet):
-    """
-    ViewSet for managing employee attendance statistics.
-    Provides detailed attendance statistics for employees.
-    """
-    serializer_class = EmployeeAttendanceStatsSerializer
-    pagination_class = DefaultPagination
-    filter_backends = [filters.SearchFilter, DjangoFilterBackend]
-    search_fields = ['employee__first_name__istartswith', 'employee__last_name__istartswith']
-
-    def get_queryset(self):
-        """
-        Get queryset of employees with their attendance statistics.
-        Filters by organization and optionally by department.
-        """
-        queryset = Employee.objects.select_related(
-            'employment_details',
-            'employment_details__position',
-            'employment_details__position__department'
-        ).filter(organization_id=self.kwargs['organization_pk'])
-
-        # Filter by department if specified
-        department_id = self.request.query_params.get('department_id')
-        if department_id:
-            queryset = queryset.filter(
-                employment_details__position__department_id=department_id
-            )
-
-        # Filter by date range if specified
-        start_date = self.request.query_params.get('start_date')
-        end_date = self.request.query_params.get('end_date')
-        
-        if start_date and end_date:
-            try:
-                start_date = datetime.fromisoformat(start_date).date()
-                end_date = datetime.fromisoformat(end_date).date()
-                
-                # Filter employee_attendances by date range
-                queryset = queryset.filter(
-                    employee_attendances__date__gte=start_date,
-                    employee_attendances__date__lte=end_date
-                ).distinct()
-            except ValueError:
-                pass  # Invalid date format, ignore the filter
-
-        return queryset.order_by('first_name', 'last_name')
-
-    def get_serializer_context(self):
-        """
-        Add organization_id to serializer context.
-        """
-        context = super().get_serializer_context()
-        context['organization_id'] = self.kwargs['organization_pk']
-        return context
-
-    def list(self, request, *args, **kwargs):
-        """
-        Override list method to include summary statistics.
-        """
-        queryset = self.get_queryset()
-        page = self.paginate_queryset(queryset)
-        
-        if page is not None:
-            serializer = self.get_serializer(page, many=True)
-            return self.get_paginated_response(serializer.data)
-
-        serializer = self.get_serializer(queryset, many=True)
-        
-        # Calculate summary statistics
-        total_employees = queryset.count()
-        total_attendance = queryset.aggregate(
-            total_present=models.Count('employee_attendances', filter=models.Q(employee_attendances__is_present=True)),
-            total_absent=models.Count('employee_attendances', filter=models.Q(employee_attendances__is_absent=True)),
-            total_late=models.Count('employee_attendances', filter=models.Q(employee_attendances__is_late=True)),
-            total_working_hours=models.Sum('employee_attendances__working_hours'),
-            total_late_minutes=models.Sum('employee_attendances__late_minutes')
-        )
-
-        response_data = {
-            'summary': {
-                'total_employees': total_employees,
-                'total_present_days': total_attendance['total_present'] or 0,
-                'total_absent_days': total_attendance['total_absent'] or 0,
-                'total_late_days': total_attendance['total_late'] or 0,
-                'total_working_hours': total_attendance['total_working_hours'] or 0,
-                'total_late_minutes': total_attendance['total_late_minutes'] or 0,
-                'average_attendance_rate': round(
-                    (total_attendance['total_present'] / 
-                     (total_attendance['total_present'] + total_attendance['total_absent'])) * 100
-                    if (total_attendance['total_present'] + total_attendance['total_absent']) > 0
-                    else 0,
-                    2
-                )
-            },
-            'results': serializer.data
-        }
-        
-        return Response(response_data)
-
-    def retrieve(self, request, *args, **kwargs):
-        """
-        Override retrieve method to include detailed statistics for a single employee.
-        """
-        instance = self.get_object()
-        serializer = self.get_serializer(instance)
-        
-        # Get date range from query params if specified
-        start_date = request.query_params.get('start_date')
-        end_date = request.query_params.get('end_date')
-        
-        if start_date and end_date:
-            try:
-                start_date = datetime.fromisoformat(start_date).date()
-                end_date = datetime.fromisoformat(end_date).date()
-                
-                # Get attendance records for the date range
-                attendance_records = instance.employee_attendances.filter(
-                    date__gte=start_date,
-                    date__lte=end_date
-                )
-            except ValueError:
-                attendance_records = instance.employee_attendances.all()
-        else:
-            attendance_records = instance.employee_attendances.all()
-        
-        # Calculate additional statistics
-        attendance_stats = {
-            'attendance_records': {
-                'total': attendance_records.count(),
-                'present': attendance_records.filter(is_present=True).count(),
-                'absent': attendance_records.filter(is_absent=True).count(),
-                'late': attendance_records.filter(is_late=True).count(),
-                'working_hours': attendance_records.aggregate(
-                    total=models.Sum('working_hours')
-                )['total'] or 0,
-                'late_minutes': attendance_records.aggregate(
-                    total=models.Sum('late_minutes')
-                )['total'] or 0
-            }
-        }
-        
-        response_data = {
-            **serializer.data,
-            'detailed_stats': attendance_stats
-        }
-        
-        return Response(response_data)
 
