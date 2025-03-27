@@ -35,7 +35,9 @@ ALLOWED_HOSTS = [
     '24svcs-server.up.railway.app',
     'http://127.0.0.1:8000/',
     'https://svcs-attendance-tracker.vercel.app',
-    '.vercel.app'
+    '.vercel.app',
+    '.railway.app'
+    
 ]
 
 INTERNAL_IPS = [
@@ -62,6 +64,7 @@ CSRF_TRUSTED_ORGINS = [
     'https://24svcs-server.up.railway.app',
     'https://svcs-attendance-tracker.vercel.app'
     '.vercel.app',
+    '.railway.app'
     ]
 SESSION_COOKIE_SECURE = True
 SESSION_COOKIE_HTTPONLY = True
