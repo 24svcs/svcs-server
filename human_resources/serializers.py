@@ -10,41 +10,42 @@ from organization.models import Preference
 from django.core.cache import cache
 from datetime import datetime
 from django.db import models
+from human_resources.utils.mixins import OrganizationTimezoneMixin
 
 
-class OrganizationTimezoneMixin:
-    def _get_organization_timezone(self, organization_id):
-        """
-        Helper method to get the organization's timezone.
-        Uses caching to reduce database queries.
-        """
-        cache_key = f"org_timezone_{organization_id}"
-        cached_timezone = cache.get(cache_key)
+# class OrganizationTimezoneMixin:
+#     def _get_organization_timezone(self, organization_id):
+#         """
+#         Helper method to get the organization's timezone.
+#         Uses caching to reduce database queries.
+#         """
+#         cache_key = f"org_timezone_{organization_id}"
+#         cached_timezone = cache.get(cache_key)
         
-        if cached_timezone:
-            return pytz.timezone(str(cached_timezone))  # Convert to string first
+#         if cached_timezone:
+#             return pytz.timezone(str(cached_timezone))  # Convert to string first
         
-        try:
-            org_preferences = Preference.objects.select_related('organization').get(
-                organization_id=organization_id
-            )
-            # Convert timezone to string first
-            timezone_str = str(org_preferences.timezone)
-            organization_timezone = pytz.timezone(timezone_str)
+#         try:
+#             org_preferences = Preference.objects.select_related('organization').get(
+#                 organization_id=organization_id
+#             )
+#             # Convert timezone to string first
+#             timezone_str = str(org_preferences.timezone)
+#             organization_timezone = pytz.timezone(timezone_str)
             
-            # Cache the timezone string
-            cache.set(cache_key, timezone_str, 3600)
+#             # Cache the timezone string
+#             cache.set(cache_key, timezone_str, 3600)
             
-            return organization_timezone
-        except Preference.DoesNotExist:
-            # Default to UTC if preferences not found
-            return pytz.UTC
+#             return organization_timezone
+#         except Preference.DoesNotExist:
+#             # Default to UTC if preferences not found
+#             return pytz.UTC
 
-    def _make_aware(self, naive_datetime, timezone):
-        """Helper method to make a naive datetime timezone-aware"""
-        if isinstance(timezone, str):
-            timezone = pytz.timezone(timezone)
-        return timezone.localize(naive_datetime) if hasattr(timezone, 'localize') else pytz.UTC.localize(naive_datetime)
+#     def _make_aware(self, naive_datetime, timezone):
+#         """Helper method to make a naive datetime timezone-aware"""
+#         if isinstance(timezone, str):
+#             timezone = pytz.timezone(timezone)
+#         return timezone.localize(naive_datetime) if hasattr(timezone, 'localize') else pytz.UTC.localize(naive_datetime)
 
 
 class ManagerSerializer(serializers.ModelSerializer):
@@ -346,6 +347,9 @@ class EmployeeScheduleSerializer(OrganizationTimezoneMixin, serializers.ModelSer
             data['shift_end'] = utc_end.time()
         
         return data
+    
+    
+    
 
 class EmploymentDetailsSerializer(serializers.ModelSerializer):
     """
@@ -1105,134 +1109,74 @@ class AdminAttendanceSerializer(OrganizationTimezoneMixin, serializers.ModelSeri
         return data
         
         
+        
+        
+        
 class EmployeeAttendanceStatsSerializer(serializers.Serializer):
     """
     Serializer for employee attendance statistics.
-    Provides aggregated statistics from EmployeeAttendance records.
+    Uses annotated fields from the queryset for better performance.
     """
-    employee_id = serializers.CharField(source='employee.id', read_only=True)
+    employee_id = serializers.CharField(source='id', read_only=True)
     employee_name = serializers.SerializerMethodField()
-    total_days = serializers.SerializerMethodField()
-    present_days = serializers.SerializerMethodField()
-    absent_days = serializers.SerializerMethodField()
-    late_days = serializers.SerializerMethodField()
-    total_late_minutes = serializers.SerializerMethodField()
+    department = serializers.SerializerMethodField()
+    position = serializers.SerializerMethodField()
+    total_days = serializers.IntegerField()
+    present_days = serializers.IntegerField()
+    absent_days = serializers.IntegerField()
+    late_days = serializers.IntegerField()
+    total_late_minutes = serializers.IntegerField()
     average_late_minutes = serializers.SerializerMethodField()
-    total_working_hours = serializers.SerializerMethodField()
+    total_working_hours = serializers.FloatField()
     average_working_hours = serializers.SerializerMethodField()
     attendance_rate = serializers.SerializerMethodField()
     late_rate = serializers.SerializerMethodField()
-    last_attendance = serializers.SerializerMethodField()
-    last_absence = serializers.SerializerMethodField()
-    consecutive_present_days = serializers.SerializerMethodField()
-    consecutive_absent_days = serializers.SerializerMethodField()
+    last_attendance = serializers.DateField(source='last_attendance_date')
+    last_absence = serializers.DateField(source='last_absence_date')
+    perfect_attendance_days = serializers.IntegerField()
+    overtime_hours = serializers.SerializerMethodField()
+    early_leaves = serializers.IntegerField()
 
     def get_employee_name(self, obj):
-        """Get the full name of the employee."""
-        return f"{obj.employee.first_name} {obj.employee.last_name}"
+        return f"{obj.first_name} {obj.last_name}"
 
-    def get_total_days(self, obj):
-        """Get total number of days in the period."""
-        return obj.employee_attendances.count()
+    def get_department(self, obj):
+        try:
+            return obj.employment_details.position.department.name
+        except (AttributeError, EmploymentDetails.DoesNotExist):
+            return None
 
-    def get_present_days(self, obj):
-        """Get number of days employee was present."""
-        return obj.employee_attendances.filter(is_present=True).count()
-
-    def get_absent_days(self, obj):
-        """Get number of days employee was absent."""
-        return obj.employee_attendances.filter(is_absent=True).count()
-
-    def get_late_days(self, obj):
-        """Get number of days employee was late."""
-        return obj.employee_attendances.filter(is_late=True).count()
-
-    def get_total_late_minutes(self, obj):
-        """Get total number of late minutes."""
-        return obj.employee_attendances.filter(is_late=True).aggregate(
-            total=models.Sum('late_minutes')
-        )['total'] or 0
+    def get_position(self, obj):
+        try:
+            return obj.employment_details.position.title
+        except (AttributeError, EmploymentDetails.DoesNotExist):
+            return None
 
     def get_average_late_minutes(self, obj):
-        """Calculate average late minutes per late day."""
-        late_days = self.get_late_days(obj)
-        if late_days == 0:
+        if not obj.late_days or not obj.total_late_minutes:
             return 0
-        return round(self.get_total_late_minutes(obj) / late_days, 2)
-
-    def get_total_working_hours(self, obj):
-        """Get total working hours."""
-        return obj.employee_attendances.aggregate(
-            total=models.Sum('working_hours')
-        )['total'] or 0
+        return round(obj.total_late_minutes / obj.late_days, 2)
 
     def get_average_working_hours(self, obj):
-        """Calculate average working hours per present day."""
-        present_days = self.get_present_days(obj)
-        if present_days == 0:
+        if not obj.present_days or not obj.total_working_hours:
             return 0
-        return round(self.get_total_working_hours(obj) / present_days, 2)
+        return round(obj.total_working_hours / obj.present_days, 2)
 
     def get_attendance_rate(self, obj):
-        """Calculate attendance rate as percentage."""
-        total_days = self.get_total_days(obj)
-        if total_days == 0:
+        if not obj.total_days:
             return 0
-        return round((self.get_present_days(obj) / total_days) * 100, 2)
+        return round((obj.present_days / obj.total_days) * 100, 2)
 
     def get_late_rate(self, obj):
-        """Calculate late rate as percentage of present days."""
-        present_days = self.get_present_days(obj)
-        if present_days == 0:
+        if not obj.present_days:
             return 0
-        return round((self.get_late_days(obj) / present_days) * 100, 2)
+        return round((obj.late_days / obj.present_days) * 100, 2)
 
-    def get_last_attendance(self, obj):
-        """Get the most recent attendance date."""
-        last_attendance = obj.employee_attendances.filter(
-            is_present=True
-        ).order_by('-date').first()
-        return last_attendance.date if last_attendance else None
-
-    def get_last_absence(self, obj):
-        """Get the most recent absence date."""
-        last_absence = obj.employee_attendances.filter(
-            is_absent=True
-        ).order_by('-date').first()
-        return last_absence.date if last_absence else None
-
-    def get_consecutive_present_days(self, obj):
-        """Calculate current streak of present days."""
-        attendances = obj.employee_attendances.filter(
-            is_present=True
-        ).order_by('-date')
-        
-        streak = 0
-        current_date = tz.now().date()
-        
-        for attendance in attendances:
-            if (current_date - attendance.date).days == streak:
-                streak += 1
-            else:
-                break
-                
-        return streak
-
-    def get_consecutive_absent_days(self, obj):
-        """Calculate current streak of absent days."""
-        absences = obj.employee_attendances.filter(
-            is_absent=True
-        ).order_by('-date')
-        
-        streak = 0
-        current_date = tz.now().date()
-        
-        for absence in absences:
-            if (current_date - absence.date).days == streak:
-                streak += 1
-            else:
-                break
-                
-        return streak
+    def get_overtime_hours(self, obj):
+        if not obj.total_working_hours or not obj.present_days:
+            return 0
+        standard_hours = 8 * obj.present_days
+        overtime = max(0, obj.total_working_hours - standard_hours)
+        return round(overtime, 2)
 
         
