@@ -9,6 +9,7 @@ from django.db import transaction
 from organization.models import Preference
 from django.core.cache import cache
 from datetime import datetime
+from django.db import models
 
 
 class OrganizationTimezoneMixin:
@@ -1103,4 +1104,135 @@ class AdminAttendanceSerializer(OrganizationTimezoneMixin, serializers.ModelSeri
         
         return data
         
+        
+class EmployeeAttendanceStatsSerializer(serializers.Serializer):
+    """
+    Serializer for employee attendance statistics.
+    Provides aggregated statistics from EmployeeAttendance records.
+    """
+    employee_id = serializers.CharField(source='employee.id', read_only=True)
+    employee_name = serializers.SerializerMethodField()
+    total_days = serializers.SerializerMethodField()
+    present_days = serializers.SerializerMethodField()
+    absent_days = serializers.SerializerMethodField()
+    late_days = serializers.SerializerMethodField()
+    total_late_minutes = serializers.SerializerMethodField()
+    average_late_minutes = serializers.SerializerMethodField()
+    total_working_hours = serializers.SerializerMethodField()
+    average_working_hours = serializers.SerializerMethodField()
+    attendance_rate = serializers.SerializerMethodField()
+    late_rate = serializers.SerializerMethodField()
+    last_attendance = serializers.SerializerMethodField()
+    last_absence = serializers.SerializerMethodField()
+    consecutive_present_days = serializers.SerializerMethodField()
+    consecutive_absent_days = serializers.SerializerMethodField()
+
+    def get_employee_name(self, obj):
+        """Get the full name of the employee."""
+        return f"{obj.employee.first_name} {obj.employee.last_name}"
+
+    def get_total_days(self, obj):
+        """Get total number of days in the period."""
+        return obj.employee_attendances.count()
+
+    def get_present_days(self, obj):
+        """Get number of days employee was present."""
+        return obj.employee_attendances.filter(is_present=True).count()
+
+    def get_absent_days(self, obj):
+        """Get number of days employee was absent."""
+        return obj.employee_attendances.filter(is_absent=True).count()
+
+    def get_late_days(self, obj):
+        """Get number of days employee was late."""
+        return obj.employee_attendances.filter(is_late=True).count()
+
+    def get_total_late_minutes(self, obj):
+        """Get total number of late minutes."""
+        return obj.employee_attendances.filter(is_late=True).aggregate(
+            total=models.Sum('late_minutes')
+        )['total'] or 0
+
+    def get_average_late_minutes(self, obj):
+        """Calculate average late minutes per late day."""
+        late_days = self.get_late_days(obj)
+        if late_days == 0:
+            return 0
+        return round(self.get_total_late_minutes(obj) / late_days, 2)
+
+    def get_total_working_hours(self, obj):
+        """Get total working hours."""
+        return obj.employee_attendances.aggregate(
+            total=models.Sum('working_hours')
+        )['total'] or 0
+
+    def get_average_working_hours(self, obj):
+        """Calculate average working hours per present day."""
+        present_days = self.get_present_days(obj)
+        if present_days == 0:
+            return 0
+        return round(self.get_total_working_hours(obj) / present_days, 2)
+
+    def get_attendance_rate(self, obj):
+        """Calculate attendance rate as percentage."""
+        total_days = self.get_total_days(obj)
+        if total_days == 0:
+            return 0
+        return round((self.get_present_days(obj) / total_days) * 100, 2)
+
+    def get_late_rate(self, obj):
+        """Calculate late rate as percentage of present days."""
+        present_days = self.get_present_days(obj)
+        if present_days == 0:
+            return 0
+        return round((self.get_late_days(obj) / present_days) * 100, 2)
+
+    def get_last_attendance(self, obj):
+        """Get the most recent attendance date."""
+        last_attendance = obj.employee_attendances.filter(
+            is_present=True
+        ).order_by('-date').first()
+        return last_attendance.date if last_attendance else None
+
+    def get_last_absence(self, obj):
+        """Get the most recent absence date."""
+        last_absence = obj.employee_attendances.filter(
+            is_absent=True
+        ).order_by('-date').first()
+        return last_absence.date if last_absence else None
+
+    def get_consecutive_present_days(self, obj):
+        """Calculate current streak of present days."""
+        attendances = obj.employee_attendances.filter(
+            is_present=True
+        ).order_by('-date')
+        
+        streak = 0
+        current_date = tz.now().date()
+        
+        for attendance in attendances:
+            if (current_date - attendance.date).days == streak:
+                streak += 1
+            else:
+                break
+                
+        return streak
+
+    def get_consecutive_absent_days(self, obj):
+        """Calculate current streak of absent days."""
+        absences = obj.employee_attendances.filter(
+            is_absent=True
+        ).order_by('-date')
+        
+        streak = 0
+        current_date = tz.now().date()
+        
+        for absence in absences:
+            if (current_date - absence.date).days == streak:
+                streak += 1
+            else:
+                break
+                
+        return streak
+
         

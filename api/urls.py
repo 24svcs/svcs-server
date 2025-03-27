@@ -7,9 +7,7 @@ from human_resources.views import (
     PositionModelViewset, 
     EmployeeModelViewset, 
     AttendanceModelViewset, 
-    EmployeeAttendanceReportView,
-    DepartmentAttendanceReportView,
-    OverallAttendanceReportView
+    EmployeeAttendanceStatsViewSet,
 )
 router = routers.DefaultRouter()
 router.register('languages', LanguageViewSet, basename='languages')
@@ -36,6 +34,8 @@ attendance_router = routers.NestedDefaultRouter(router, r'organizations', lookup
 attendance_router.register(r'attendances', AttendanceModelViewset, basename='attendance')
 
 
+employee_attendance_stats_router = routers.NestedDefaultRouter(router, r'organizations', lookup='organization')
+employee_attendance_stats_router.register(r'employee-attendance-stats', EmployeeAttendanceStatsViewSet, basename='employee-attendance-stats')
 
 
 
@@ -47,17 +47,6 @@ urlpatterns = [
      path(r'', include(position_router.urls)),
      path(r'', include(employee_router.urls)),
      path(r'', include(attendance_router.urls)),
-     
-     # Attendance report endpoints
-     path('organizations/<str:organization_pk>/attendance-report/employees/', 
-          EmployeeAttendanceReportView.as_view(), 
-          name='organization-employee-attendance-report'),
-     
-     path('organizations/<str:organization_pk>/attendance-report/departments/', 
-          DepartmentAttendanceReportView.as_view(), 
-          name='organization-department-attendance-report'),
-     
-     path('organizations/<str:organization_pk>/attendance-report/overall/', 
-          OverallAttendanceReportView.as_view(), 
-          name='organization-overall-attendance-report'),
+     path(r'', include(employee_attendance_stats_router.urls)),
+
 ]

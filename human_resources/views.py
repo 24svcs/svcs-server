@@ -24,8 +24,9 @@ from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.views import APIView
 from django.db.models import Count, Q
 
-from .utils.attendance_calculator import AttendanceCalculator
 from .utils.statistics_calculator import StatisticsCalculator
+from .serializers import EmployeeAttendanceStatsSerializer
+from django.db import models
     
 class DepartmentModelViewset(ModelViewSet):
     pagination_class = DefaultPagination
@@ -469,182 +470,151 @@ class EmployeeAttendanceReportView(BaseAttendanceReportView):
         return self._generate_paginated_response(
             employee_stats, start_date, end_date, request)
 
+class EmployeeAttendanceStatsViewSet(ModelViewSet):
+    """
+    ViewSet for managing employee attendance statistics.
+    Provides detailed attendance statistics for employees.
+    """
+    serializer_class = EmployeeAttendanceStatsSerializer
+    pagination_class = DefaultPagination
+    filter_backends = [filters.SearchFilter, DjangoFilterBackend]
+    search_fields = ['employee__first_name__istartswith', 'employee__last_name__istartswith']
 
-class DepartmentAttendanceReportView(BaseAttendanceReportView):
-    """
-    Generate attendance reports aggregated by department.
-    """
-    
-    def get(self, request, organization_pk):
-        # Get date range
-        date_range = self.get_date_range(request)
-        if isinstance(date_range, Response):  # Error occurred
-            return date_range
-            
-        start_date, end_date = date_range
-        department_id = request.query_params.get('department_id')
-        
-        # If specific department is requested, return error since this view is for all departments
+    def get_queryset(self):
+        """
+        Get queryset of employees with their attendance statistics.
+        Filters by organization and optionally by department.
+        """
+        queryset = Employee.objects.select_related(
+            'employment_details',
+            'employment_details__position',
+            'employment_details__position__department'
+        ).filter(organization_id=self.kwargs['organization_pk'])
+
+        # Filter by department if specified
+        department_id = self.request.query_params.get('department_id')
         if department_id:
-            return Response(
-                {"error": "This endpoint provides reports for all departments. Remove the department_id parameter."},
-                status=status.HTTP_400_BAD_REQUEST
+            queryset = queryset.filter(
+                employment_details__position__department_id=department_id
             )
+
+        # Filter by date range if specified
+        start_date = self.request.query_params.get('start_date')
+        end_date = self.request.query_params.get('end_date')
         
-        # Get filtered querysets with optimized joins
-        attendance_queryset = self.get_filtered_queryset(organization_pk, start_date, end_date)
-        
-        # Load all departments in a single query with prefetched data
-        departments = Department.objects.filter(organization_id=organization_pk).prefetch_related(
-            'positions',
-            'positions__employment_details',
-            'positions__employment_details__employee'
-        )
-        
-        # Pre-calculate attendance statistics by department to avoid repeated queries
-        dept_attendance_stats = {}
-        for attendance in attendance_queryset:
+        if start_date and end_date:
             try:
-                dept_id = attendance.employee.employment_details.position.department_id
-                if dept_id:
-                    if dept_id not in dept_attendance_stats:
-                        dept_attendance_stats[dept_id] = {
-                            'present': 0,
-                            'absent': 0,
-                            'late': 0
-                        }
-                    
-                    if attendance.status == Attendance.ATTENDANCE_ABSENT:
-                        dept_attendance_stats[dept_id]['absent'] += 1
-                    elif attendance.status == Attendance.ATTENDANCE_LATE:
-                        dept_attendance_stats[dept_id]['late'] += 1
-                        dept_attendance_stats[dept_id]['present'] += 1  # Late employees are also counted as present
-                    else:
-                        dept_attendance_stats[dept_id]['present'] += 1
-            except AttributeError:
-                # Skip attendance records without proper department association
-                continue
-        
-        # Calculate department-wise statistics
-        department_stats = []
-            
-        for dept in departments:
-            # Collect all employees in this department (already prefetched)
-            dept_employees = []
-            for position in dept.positions.all():
-                for emp_details in position.employment_details.all():
-                    if hasattr(emp_details, 'employee') and emp_details.employee:
-                        dept_employees.append(emp_details.employee)
-            
-            dept_employee_count = len(dept_employees)
-            
-            # Get attendance stats from our pre-calculated map
-            dept_stats = dept_attendance_stats.get(dept.id, {'present': 0, 'absent': 0, 'late': 0})
-            dept_days_present = dept_stats['present']
-            dept_days_absent = dept_stats['absent']
-            dept_days_late = dept_stats['late']
-            
-            # Calculate total working days across all employees
-            dept_total_working_days = 0
-            for employee in dept_employees:
-                    try:
-                        days_off = employee.employment_details.days_off or []
-                    except (AttributeError, EmploymentDetails.DoesNotExist):
-                        days_off = []
-                    
-                    # Count working days for this employee
-            employee_working_days = self.calculate_working_days(start_date, end_date, days_off)
-            dept_total_working_days += employee_working_days
+                start_date = datetime.fromisoformat(start_date).date()
+                end_date = datetime.fromisoformat(end_date).date()
                 
-            # Calculate department statistics
-            dept_attendance_percentage = round((dept_days_present / dept_total_working_days) * 100, 2) if dept_total_working_days > 0 else 0
-                
-            department_stats.append({
-                    'id': dept.id,
-                    'name': dept.name,
-                    'employee_count': dept_employee_count,
-                    'days_present': dept_days_present,
-                    'days_absent': dept_days_absent,
-                    'days_late': dept_days_late,
-                    'attendance_percentage': dept_attendance_percentage
-                })
+                # Filter employee_attendances by date range
+                queryset = queryset.filter(
+                    employee_attendances__date__gte=start_date,
+                    employee_attendances__date__lte=end_date
+                ).distinct()
+            except ValueError:
+                pass  # Invalid date format, ignore the filter
+
+        return queryset.order_by('first_name', 'last_name')
+
+    def get_serializer_context(self):
+        """
+        Add organization_id to serializer context.
+        """
+        context = super().get_serializer_context()
+        context['organization_id'] = self.kwargs['organization_pk']
+        return context
+
+    def list(self, request, *args, **kwargs):
+        """
+        Override list method to include summary statistics.
+        """
+        queryset = self.get_queryset()
+        page = self.paginate_queryset(queryset)
         
-        # Calculate total days safely
-        total_days = (end_date - start_date).days + 1 if start_date and end_date else 0
+        if page is not None:
+            serializer = self.get_serializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
+
+        serializer = self.get_serializer(queryset, many=True)
         
-        # Generate the report
-        report = {
-            'report_period': {
-                'start_date': start_date.isoformat() if start_date else None,
-                'end_date': end_date.isoformat() if end_date else None,
-                'total_days': total_days,
+        # Calculate summary statistics
+        total_employees = queryset.count()
+        total_attendance = queryset.aggregate(
+            total_present=models.Count('employee_attendances', filter=models.Q(employee_attendances__is_present=True)),
+            total_absent=models.Count('employee_attendances', filter=models.Q(employee_attendances__is_absent=True)),
+            total_late=models.Count('employee_attendances', filter=models.Q(employee_attendances__is_late=True)),
+            total_working_hours=models.Sum('employee_attendances__working_hours'),
+            total_late_minutes=models.Sum('employee_attendances__late_minutes')
+        )
+
+        response_data = {
+            'summary': {
+                'total_employees': total_employees,
+                'total_present_days': total_attendance['total_present'] or 0,
+                'total_absent_days': total_attendance['total_absent'] or 0,
+                'total_late_days': total_attendance['total_late'] or 0,
+                'total_working_hours': total_attendance['total_working_hours'] or 0,
+                'total_late_minutes': total_attendance['total_late_minutes'] or 0,
+                'average_attendance_rate': round(
+                    (total_attendance['total_present'] / 
+                     (total_attendance['total_present'] + total_attendance['total_absent'])) * 100
+                    if (total_attendance['total_present'] + total_attendance['total_absent']) > 0
+                    else 0,
+                    2
+                )
             },
-            'department_statistics': department_stats,
+            'results': serializer.data
         }
         
-        return Response(report, status=status.HTTP_200_OK)
+        return Response(response_data)
 
-
-class OverallAttendanceReportView(BaseAttendanceReportView):
-    """
-    Generate overall attendance statistics for the organization.
-    """
-    
-    def get(self, request, organization_pk):
-        # Get date range and department filter
-        date_range = self.get_date_range(request)
-        if isinstance(date_range, Response):  # Error occurred
-            return date_range
-            
-        start_date, end_date = date_range
-        department_id = request.query_params.get('department_id')
+    def retrieve(self, request, *args, **kwargs):
+        """
+        Override retrieve method to include detailed statistics for a single employee.
+        """
+        instance = self.get_object()
+        serializer = self.get_serializer(instance)
         
-        # Use Django's aggregation for efficient counting
-        attendance_queryset = self.get_filtered_queryset(organization_pk, start_date, end_date, department_id)
-        employees_queryset = self.get_employees_queryset(organization_pk, start_date, end_date, department_id)
+        # Get date range from query params if specified
+        start_date = request.query_params.get('start_date')
+        end_date = request.query_params.get('end_date')
         
-        # Calculate total days in the period
-        total_days = (end_date - start_date).days + 1 if start_date and end_date else 0
+        if start_date and end_date:
+            try:
+                start_date = datetime.fromisoformat(start_date).date()
+                end_date = datetime.fromisoformat(end_date).date()
+                
+                # Get attendance records for the date range
+                attendance_records = instance.employee_attendances.filter(
+                    date__gte=start_date,
+                    date__lte=end_date
+                )
+            except ValueError:
+                attendance_records = instance.employee_attendances.all()
+        else:
+            attendance_records = instance.employee_attendances.all()
         
-        # Calculate overall statistics using efficient aggregation
-        total_employees = employees_queryset.count()
-        
-        # Using Django's aggregation and annotation for better performance
-        attendance_stats = attendance_queryset.aggregate(
-            total_records=Count('id'),
-            total_absent=Count('id', filter=Q(status=Attendance.ATTENDANCE_ABSENT)),
-            total_late=Count('id', filter=Q(status=Attendance.ATTENDANCE_LATE))
-        )
-        
-        total_attendance_records = attendance_stats['total_records']
-        total_absent = attendance_stats['total_absent']
-        total_late = attendance_stats['total_late']
-        total_present = total_attendance_records - total_absent
-        
-        # Calculate overall attendance percentage
-        department_description = f"Department {department_id}" if department_id else "All departments"
-        
-        # Calculate average attendance percentage safely
-        average_attendance_percentage = 0
-        if total_days and total_employees:
-            average_attendance_percentage = round((total_present / (total_days * total_employees)) * 100, 2)
-        
-        # Generate the report
-        report = {
-            'report_period': {
-                'start_date': start_date.isoformat() if start_date else None,
-                'end_date': end_date.isoformat() if end_date else None,
-                'total_days': total_days,
-                'scope': department_description,
-            },
-            'overall_statistics': {
-                'total_employees': total_employees,
-                'total_attendance_records': total_attendance_records,
-                'total_present': total_present,
-                'total_absent': total_absent,
-                'total_late': total_late,
-                'average_attendance_percentage': average_attendance_percentage
+        # Calculate additional statistics
+        attendance_stats = {
+            'attendance_records': {
+                'total': attendance_records.count(),
+                'present': attendance_records.filter(is_present=True).count(),
+                'absent': attendance_records.filter(is_absent=True).count(),
+                'late': attendance_records.filter(is_late=True).count(),
+                'working_hours': attendance_records.aggregate(
+                    total=models.Sum('working_hours')
+                )['total'] or 0,
+                'late_minutes': attendance_records.aggregate(
+                    total=models.Sum('late_minutes')
+                )['total'] or 0
             }
         }
         
-        return Response(report, status=status.HTTP_200_OK)
+        response_data = {
+            **serializer.data,
+            'detailed_stats': attendance_stats
+        }
+        
+        return Response(response_data)
+
