@@ -133,4 +133,8 @@ CELERY_BEAT_SCHEDULE = {
         'schedule': 10,
         'args': ()
     },
+    'refine-attendance-records': {
+        'task': 'api.jobs.refine_attendance_record.refine_attendance_records',
+        'schedule': crontab(minute='*/1'),
+    }
 }
