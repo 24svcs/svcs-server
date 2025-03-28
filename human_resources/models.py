@@ -8,8 +8,11 @@ import random
 from django.core.exceptions import ValidationError
 from django.db.models.signals import pre_save
 from django.dispatch import receiver
+from datetime import datetime, timedelta
+from django.db.models import Max
+import logging
 
-
+logger = logging.getLogger(__name__)
 
 def generate_unique_employee_id():
     employee_id = None
@@ -105,6 +108,7 @@ class Employee(models.Model):
     emergency_contact_phone = PhoneNumberField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+    is_active = models.BooleanField(default=True)
     
     class Meta:
         indexes = [
@@ -239,9 +243,10 @@ class Attendance(models.Model):
     organization = models.ForeignKey(Organization, on_delete=models.CASCADE, related_name='attendances')
     employee = models.ForeignKey(Employee, on_delete=models.CASCADE, related_name='attendances')
     date = models.DateField()
-    time_in = models.TimeField()
-    time_out = models.TimeField(blank=True, null=True)
+    time_in = models.TimeField(null=True, blank=True)
+    time_out = models.TimeField(null=True, blank=True)
     status = models.CharField(max_length=20, choices=ATTENDANCE_STATUSES)
+    overtime_hours = models.DecimalField(max_digits=6, decimal_places=2, default=0)
     note = models.TextField(blank=True, null=True)
     
     class Meta:
@@ -385,6 +390,7 @@ class EmployeeAttendance(models.Model):
     is_present = models.BooleanField(default=False)
     is_late = models.BooleanField(default=False)
     is_absent = models.BooleanField(default=False)
+    is_holiday = models.BooleanField(default=False)
     late_minutes = models.IntegerField(default=0)
     working_hours = models.DecimalField(max_digits=6, decimal_places=2, default=0)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -434,4 +440,42 @@ class EmployeeAttendance(models.Model):
 
     def __str__(self):
         return f"{self.employee.first_name} - {self.date} - {'Present' if self.is_present else 'Absent'}"
+
+def generate_single_employee_report(employee):
+    """
+    Generate attendance report for a single employee starting from:
+    1. The day after their last recorded attendance, or
+    2. Their creation date in the system if they have no previous records and are active
+    Records are generated up to yesterday.
+    """
+    organization = employee.organization
+    today = datetime.now().date()
+    
+    # Only process active employees
+    if not employee.is_active:
+        logger.info(f"Skipping inactive employee {employee.id}")
+        return 0
+    
+    # Find the most recent attendance record for this employee
+    last_record = EmployeeAttendance.objects.filter(employee=employee).aggregate(Max('date'))['date__max']
+    
+    if not last_record:
+        # If no previous record exists, use employee creation date
+        # Convert created_at datetime to date object
+        creation_date = employee.created_at.date()
+        start_date = creation_date
+        logger.info(f"No previous records for employee {employee.id}. Using creation date: {creation_date}")
+    else:
+        # Start from the day after the last record
+        start_date = last_record + timedelta(days=1)
+        logger.info(f"Continuing from last record for employee {employee.id}: {last_record}")
+    
+    # Only generate reports up to yesterday
+    end_date = today - timedelta(days=1)
+    
+    # If start date is today or in the future, or if start date is after end date, no reports needed
+    if start_date >= today or start_date > end_date:
+        return 0
+    
+    # Rest of the function remains the same...
 

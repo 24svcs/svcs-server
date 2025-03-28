@@ -1,6 +1,7 @@
 
 from pathlib import Path
 import os
+from celery.schedules import crontab
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 from decouple import config
@@ -120,3 +121,16 @@ CSRF_COOKIE_SECURE = True
 
 
 APPEND_SLASH=False
+
+
+
+CELERY_BROKER_URL = config('CELERY_BROKER_URL')
+CELERY_BEAT_SCHEDULE = {
+    'generate_attendance_reports': {
+        },
+    'generate_attendance_reports': {
+        'task': 'api.tasks.generate_attendance_report.generate_attendance_reports',
+        'schedule': 10,
+        'args': ()
+    },
+}

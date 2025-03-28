@@ -1,3 +1,8 @@
-from django.shortcuts import render
+from .task import notify_user
+from django.http import HttpResponse
 
-# Create your views here.
+
+
+# def notify_user_view(request):
+#     notify_user.delay('Hello, world!')
+#     return HttpResponse('Notification sent')

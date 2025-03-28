@@ -9,11 +9,17 @@ from human_resources.views import (
     AttendanceModelViewset, 
     EmployeeAttendanceStatsViewSet,
 )
+
+
+
+
 router = routers.DefaultRouter()
 router.register('languages', LanguageViewSet, basename='languages')
 router.register(r'organizations', OrganizationViewSet, basename='organizations')
 member_router = routers.NestedDefaultRouter(router, r'organizations', lookup='organization')
 member_router.register(r'members', MemberViewSet, basename='member')
+
+
 
 
 invitation_router = routers.NestedDefaultRouter(router, r'organizations', lookup='organization')
@@ -48,5 +54,6 @@ urlpatterns = [
      path(r'', include(employee_router.urls)),
      path(r'', include(attendance_router.urls)),
      path(r'', include(employee_attendance_stats_router.urls)),
+    #  path(r'notify-user/', notify_user_view, name='notify-user'),
 
 ]
