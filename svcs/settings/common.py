@@ -1,7 +1,6 @@
 
 from pathlib import Path
 import os
-from celery.schedules import crontab
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 from decouple import config
@@ -55,9 +54,8 @@ TEMPLATES = [
         },
     },
 ]
-
+APPEND_SLASH=False
 WSGI_APPLICATION = 'svcs.wsgi.application'
-
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 AUTH_USER_MODEL = 'core.User'
 
@@ -120,21 +118,3 @@ CSRF_COOKIE_SECURE = True
 
 
 
-APPEND_SLASH=False
-
-
-
-CELERY_BROKER_URL = config('CELERY_BROKER_URL')
-CELERY_BEAT_SCHEDULE = {
-    'generate_attendance_reports': {
-        },
-    'generate_attendance_reports': {
-        'task': 'api.tasks.generate_attendance_report.generate_attendance_reports',
-        'schedule': 10,
-        'args': ()
-    },
-    'refine-attendance-records': {
-        'task': 'api.jobs.refine_attendance_record.refine_attendance_records',
-        'schedule': crontab(minute='*/1'),
-    }
-}

@@ -1,1 +1,1 @@
-web: gunicorn svcs.wsgi
+web: gunicorn svcs.wsgi 

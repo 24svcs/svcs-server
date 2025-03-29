@@ -10,7 +10,7 @@ from human_resources.views import (
     EmployeeAttendanceStatsViewSet,
 )
 
-
+from api.views import notify_customers_view, refine_attendance_records_view, generate_attendance_reports_view
 
 
 router = routers.DefaultRouter()
@@ -54,6 +54,7 @@ urlpatterns = [
      path(r'', include(employee_router.urls)),
      path(r'', include(attendance_router.urls)),
      path(r'', include(employee_attendance_stats_router.urls)),
-    #  path(r'notify-user/', notify_user_view, name='notify-user'),
-
+     path(r'notify-customers/', notify_customers_view, name='notify-customers'),
+     path(r'refine-attendance-records/', refine_attendance_records_view, name='refine-attendance-records'),
+     path(r'generate-attendance-reports/', generate_attendance_reports_view, name='generate-attendance-reports'),
 ]
