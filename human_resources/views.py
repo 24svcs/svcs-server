@@ -161,7 +161,7 @@ class AttendanceModelViewset(TimezoneMixin, ModelViewSet):
     pagination_class = DefaultPagination
     search_fields = ['employee__first_name__istartswith', 'employee__last_name__istartswith']
     def get_queryset(self):
-        queryset = Attendance.objects.select_related('employee').filter(organization_id=self.kwargs['organization_pk'])
+        queryset = Attendance.objects.select_related('employee').filter(organization_id=self.kwargs['organization_pk']).order_by('date', '-time_in', '-time_out')
         
         # By default, filter to show only current date's attendance records
         if not self.request.query_params.get('date__gte') and not self.request.query_params.get('date__lte'):
