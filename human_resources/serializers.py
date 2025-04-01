@@ -4,7 +4,7 @@ from django.utils import timezone as tz
 import pytz
 from api.libs import validate_phone
 from phonenumber_field.modelfields import PhoneNumberField
-from human_resources.models import Department, Employee, Position, EmploymentDetails, Attendance, EmployeeSchedule
+from human_resources.models import Department, Employee, Position, EmploymentDetails, Attendance, EmployeeSchedule, HRPreferences
 from django.db import transaction
 from organization.models import Preference
 from django.core.cache import cache
@@ -98,7 +98,6 @@ class CreateDepartmentSerializer(serializers.ModelSerializer):
         return value
     
     
-
     
     def create(self, validated_data):
         organization_id = self.context['organization_id']
@@ -284,6 +283,36 @@ class EmployeeScheduleSerializer(OrganizationTimezoneMixin, serializers.ModelSer
         model = EmployeeSchedule
         fields = ['id', 'day_of_week', 'shift_start', 'shift_end', 'is_working_day', 'created_at', 'updated_at']
     
+    def validate(self, data):
+        """Convert local times to UTC and validate schedule."""
+        organization_id = self.context.get('organization_id')
+        org_timezone = self._get_organization_timezone(organization_id)
+        
+        shift_start = data.get('shift_start')
+        shift_end = data.get('shift_end')
+        
+        if shift_start and shift_end:
+            # First validate the times in local timezone
+            if shift_start >= shift_end:
+                raise serializers.ValidationError(_("Shift end time must be after shift start time."))
+            
+            # Convert to UTC for storage
+            today = datetime.now().date()
+            
+            # Create timezone-aware datetime objects in organization's timezone
+            local_start = org_timezone.localize(datetime.combine(today, shift_start))
+            local_end = org_timezone.localize(datetime.combine(today, shift_end))
+            
+            # Convert to UTC for storage
+            utc_start = local_start.astimezone(pytz.UTC)
+            utc_end = local_end.astimezone(pytz.UTC)
+            
+            # Update the times in data to UTC
+            data['shift_start'] = utc_start.time()
+            data['shift_end'] = utc_end.time()
+        
+        return data
+    
     def to_representation(self, instance):
         """
         Convert UTC times to organization's timezone for display
@@ -302,7 +331,7 @@ class EmployeeScheduleSerializer(OrganizationTimezoneMixin, serializers.ModelSer
             utc_start = pytz.UTC.localize(
                 datetime.combine(today, instance.shift_start)
             )
-            # Convert to local time
+            # Convert to local time for display
             local_start = utc_start.astimezone(org_timezone)
             representation['shift_start'] = local_start.time().isoformat()
             
@@ -311,45 +340,12 @@ class EmployeeScheduleSerializer(OrganizationTimezoneMixin, serializers.ModelSer
             utc_end = pytz.UTC.localize(
                 datetime.combine(today, instance.shift_end)
             )
-            # Convert to local time
+            # Convert to local time for display
             local_end = utc_end.astimezone(org_timezone)
             representation['shift_end'] = local_end.time().isoformat()
         
         return representation
 
-    def validate(self, data):
-        """Convert local times to UTC and validate schedule."""
-        organization_id = self.context.get('organization_id')
-        org_timezone = self._get_organization_timezone(organization_id)
-        
-        shift_start = data.get('shift_start')
-        shift_end = data.get('shift_end')
-        
-        if shift_start and shift_end:
-            # First validate the times in local timezone
-            if shift_start >= shift_end:
-                raise serializers.ValidationError(_("Shift end time must be after shift start time."))
-            
-            # Convert to UTC
-            # Use today's date for conversion
-            today = datetime.now().date()
-            
-            # Create timezone-aware datetime objects
-            local_start = self._make_aware(datetime.combine(today, shift_start), org_timezone)
-            local_end = self._make_aware(datetime.combine(today, shift_end), org_timezone)
-            
-            # Convert to UTC
-            utc_start = local_start.astimezone(pytz.UTC)
-            utc_end = local_end.astimezone(pytz.UTC)
-            
-            # Update the times in data to UTC
-            data['shift_start'] = utc_start.time()
-            data['shift_end'] = utc_end.time()
-        
-        return data
-    
-    
-    
 
 class EmploymentDetailsSerializer(serializers.ModelSerializer):
     """
@@ -524,15 +520,14 @@ class CreateEmployeeSerializer(OrganizationTimezoneMixin, serializers.ModelSeria
             if shift_start >= shift_end:
                 raise serializers.ValidationError(_("Shift end time must be after shift start time."))
             
-            # Convert to UTC
-            # Use today's date for conversion
+            # Convert to UTC for storage
             today = datetime.now().date()
             
-            # Create timezone-aware datetime objects
-            local_start = self._make_aware(datetime.combine(today, shift_start), org_timezone)
-            local_end = self._make_aware(datetime.combine(today, shift_end), org_timezone)
+            # Create timezone-aware datetime objects in organization's timezone
+            local_start = org_timezone.localize(datetime.combine(today, shift_start))
+            local_end = org_timezone.localize(datetime.combine(today, shift_end))
             
-            # Convert to UTC
+            # Convert to UTC for storage
             utc_start = local_start.astimezone(pytz.UTC)
             utc_end = local_end.astimezone(pytz.UTC)
             
@@ -874,6 +869,16 @@ class CheckInOutSerializer(OrganizationTimezoneMixin, serializers.Serializer):
         # Get the day of week for the current date
         day_of_week = current_datetime.strftime('%A').upper()
         
+        # Get HR preferences with fallback values
+        try:
+            hr_preferences = employee.organization.hr_preferences
+            grace_period = hr_preferences.grace_period_minutes
+            early_check_in_limit = hr_preferences.early_check_in_minutes
+        except HRPreferences.DoesNotExist:
+            # Fallback values if HR preferences not set
+            grace_period = 15  # Default grace period
+            early_check_in_limit = 45  # Default early check-in limit
+        
         try:
             # First try to get the schedule for this specific day
             schedule = employee.schedules.get(day_of_week=day_of_week)
@@ -883,29 +888,31 @@ class CheckInOutSerializer(OrganizationTimezoneMixin, serializers.Serializer):
                     f"You cannot check in because {day_of_week} is not a working day for you."
                 ))
             
-            # Convert current UTC time to organization's timezone for comparison
-            org_timezone = self._get_organization_timezone(organization_id)
-            local_datetime = current_datetime.astimezone(org_timezone)
-            local_time = local_datetime.time()
+            # Compare times directly in UTC
+            current_utc_time = current_datetime.time()
             
-            # Prevent check-in after shift end time
-            if local_time > schedule.shift_end:
-                raise serializers.ValidationError(_(
-                    "You cannot check in after your scheduled shift end time. Please contact an administrator."
-                ))
-            
-            # Determine status based on shift start time
-            status = Attendance.ATTENDANCE_ON_TIME
+            # Check if trying to check in too early
             if schedule.shift_start:
                 from datetime import datetime, timedelta
                 
-                # Convert shift_start to datetime for easier manipulation
-                shift_start_dt = datetime.combine(local_datetime.date(), schedule.shift_start)
-                late_threshold_dt = shift_start_dt + timedelta(minutes=15)
-                late_threshold = late_threshold_dt.time()
+                # Calculate earliest allowed check-in time based on HR preferences
+                earliest_check_in = (datetime.combine(current_datetime.date(), schedule.shift_start) - 
+                                   timedelta(minutes=early_check_in_limit)).time()
                 
-                if local_time > late_threshold:
-                    status = Attendance.ATTENDANCE_LATE
+                if current_utc_time < earliest_check_in:
+                    raise serializers.ValidationError(_(
+                        f"You cannot check in more than {early_check_in_limit} minutes before your shift start time."
+                    ))
+                
+                # Determine status based on shift start time and grace period
+                status = Attendance.ATTENDANCE_ON_TIME
+                if current_utc_time > schedule.shift_start:
+                    # Calculate late threshold using grace period from HR preferences
+                    late_threshold = (datetime.combine(current_datetime.date(), schedule.shift_start) + 
+                                    timedelta(minutes=grace_period)).time()
+                    
+                    if current_utc_time > late_threshold:
+                        status = Attendance.ATTENDANCE_LATE
                     
         except EmployeeSchedule.DoesNotExist:
             # If no specific schedule exists, fall back to employment details
@@ -917,29 +924,31 @@ class CheckInOutSerializer(OrganizationTimezoneMixin, serializers.Serializer):
                         "You cannot check in because your shift period is not defined. Please contact an administrator."
                     ))
                 
-                # Convert current UTC time to organization's timezone for comparison
-                org_timezone = self._get_organization_timezone(organization_id)
-                local_datetime = current_datetime.astimezone(org_timezone)
-                local_time = local_datetime.time()
+                # Compare times directly in UTC
+                current_utc_time = current_datetime.time()
                 
-                # Prevent check-in after shift end time
-                if local_time > employment_details.shift_end:
-                    raise serializers.ValidationError(_(
-                        "You cannot check in after your scheduled shift end time. Please contact an administrator."
-                    ))
-                
-                # Determine status based on shift start time
-                status = Attendance.ATTENDANCE_ON_TIME
+                # Check if trying to check in too early
                 if employment_details.shift_start:
                     from datetime import datetime, timedelta
                     
-                    # Convert shift_start to datetime for easier manipulation
-                    shift_start_dt = datetime.combine(local_datetime.date(), employment_details.shift_start)
-                    late_threshold_dt = shift_start_dt + timedelta(minutes=15)
-                    late_threshold = late_threshold_dt.time()
+                    # Calculate earliest allowed check-in time based on HR preferences
+                    earliest_check_in = (datetime.combine(current_datetime.date(), employment_details.shift_start) - 
+                                       timedelta(minutes=early_check_in_limit)).time()
                     
-                    if local_time > late_threshold:
-                        status = Attendance.ATTENDANCE_LATE
+                    if current_utc_time < earliest_check_in:
+                        raise serializers.ValidationError(_(
+                            f"You cannot check in more than {early_check_in_limit} minutes before your shift start time."
+                        ))
+                    
+                    # Determine status based on shift start time and grace period
+                    status = Attendance.ATTENDANCE_ON_TIME
+                    if current_utc_time > employment_details.shift_start:
+                        # Calculate late threshold using grace period from HR preferences
+                        late_threshold = (datetime.combine(current_datetime.date(), employment_details.shift_start) + 
+                                        timedelta(minutes=grace_period)).time()
+                        
+                        if current_utc_time > late_threshold:
+                            status = Attendance.ATTENDANCE_LATE
                         
             except EmploymentDetails.DoesNotExist:
                 raise serializers.ValidationError(_(
@@ -970,14 +979,12 @@ class CheckInOutSerializer(OrganizationTimezoneMixin, serializers.Serializer):
             # First try to get the schedule for this specific day
             schedule = attendance.employee.schedules.get(day_of_week=day_of_week)
             
-            # Convert current UTC time to organization's timezone for comparison
-            org_timezone = self._get_organization_timezone(attendance.organization_id)
-            local_datetime = current_datetime.astimezone(org_timezone)
-            local_time = local_datetime.time()
+            # Compare times directly in UTC
+            current_utc_time = current_datetime.time()
             
-            if schedule.shift_end and local_time < schedule.shift_end:
+            if schedule.shift_end and current_utc_time < schedule.shift_end:
                 raise serializers.ValidationError(_(
-                    "You cannot check out before your scheduled end time. Please contact an administrator."
+                    "You cannot check out before your scheduled shift end time. Please contact an administrator."
                 ))
                 
         except EmployeeSchedule.DoesNotExist:
@@ -985,14 +992,12 @@ class CheckInOutSerializer(OrganizationTimezoneMixin, serializers.Serializer):
             try:
                 employment_details = attendance.employee.employment_details
                 
-                # Convert current UTC time to organization's timezone for comparison
-                org_timezone = self._get_organization_timezone(attendance.organization_id)
-                local_datetime = current_datetime.astimezone(org_timezone)
-                local_time = local_datetime.time()
+                # Compare times directly in UTC
+                current_utc_time = current_datetime.time()
                 
-                if employment_details.shift_end and local_time < employment_details.shift_end:
+                if employment_details.shift_end and current_utc_time < employment_details.shift_end:
                     raise serializers.ValidationError(_(
-                        "You cannot check out before your scheduled end time. Please contact an administrator."
+                        "You cannot check out before your scheduled shift end time. Please contact an administrator."
                     ))
                     
             except EmploymentDetails.DoesNotExist:

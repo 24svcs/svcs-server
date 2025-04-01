@@ -32,6 +32,8 @@ from organization.serializers.member import (
     MemberInvitation
 )
 
+from organization.filters import MemberFilter, InvitationFilter
+from django.db import models
 
 
 
@@ -213,6 +215,8 @@ class OrganizationViewSet(TimezoneMixin, viewsets.ModelViewSet):
         return Response(serializer.data)
 
 
+
+# ===================== Members Viewset =====================
 class MemberViewSet(
     viewsets.GenericViewSet,
     mixins.ListModelMixin,
@@ -226,6 +230,7 @@ class MemberViewSet(
     pagination_class = DefaultPagination
     filter_backends = [filters.SearchFilter, DjangoFilterBackend]
     search_fields = ['user__email', 'user__first_name', 'user__last_name']
+    filterset_class = MemberFilter
     
     def get_permissions(self):
         if self.action in ['update', 'partial_update']:
@@ -241,14 +246,9 @@ class MemberViewSet(
         return MemberSerializer
     
     def get_queryset(self):
-        # Optimize query with select_related and prefetch_related
-        return Member.objects.filter(
+        return Member.objects.select_related('organization', 'user').prefetch_related('permissions').filter(
             organization_id=self.kwargs['organization_pk']
-        ).select_related(
-            'user', 'organization'
-        ).prefetch_related(
-            'permissions'
-        )
+        ).order_by('user__first_name', 'user__last_name')
     
     def get_serializer_context(self):
         return {'organization_id': self.kwargs['organization_pk']}
@@ -284,20 +284,31 @@ class MemberViewSet(
             # Delete the member
             return super().perform_destroy(instance)
 
+    def list(self, request, *args, **kwargs):
+        queryset = self.filter_queryset(self.get_queryset())
+        page = self.paginate_queryset(queryset)
+        
+        if page is not None:
+            serializer = self.get_serializer(page, many=True)
+            response = self.get_paginated_response(serializer.data)
+            stats = Member.objects.select_related('organization').filter(organization_id=self.kwargs['organization_pk']).aggregate(
+                total_members=models.Count('id'),
+                active_members=models.Count('id', filter=models.Q(status=Member.ACTIVE)),
+                inactive_members=models.Count('id', filter=models.Q(status=Member.INACTIVE))
+            )
+            
+            response.data['statistics'] = stats
+            return response
+
+        serializer = self.get_serializer(queryset, many=True)
+        return Response(serializer.data)
+
 
 class MemberInvitationViewSet(TimezoneMixin,viewsets.ModelViewSet):
     pagination_class = DefaultPagination
     filter_backends = [filters.SearchFilter, DjangoFilterBackend]
     search_fields = ['email']
-    
-    def get_permissions(self):
-        if self.request.method in ['POST']:
-            return [IsAuthenticated(), OrganizationPermission(Permission.CREATE_MEMBER_INVITATION)]
-        elif self.request.method in ['PATCH', 'PUT']:
-            return [IsAuthenticated()]
-        elif self.request.method in ['DELETE']:
-            return [IsAuthenticated(), OrganizationPermission(Permission.DELETE_MEMBER_INVITATION)]
-        return [IsAuthenticated()]
+    filterset_class = InvitationFilter
     
     def get_queryset(self):
         # Optimize query with select_related
@@ -319,22 +330,34 @@ class MemberInvitationViewSet(TimezoneMixin,viewsets.ModelViewSet):
         return super().perform_destroy(instance)
     
     
-    #TODO: check if the user has the proper permission
-    def perform_create(self, serializer):
-        # Check if the user has the proper permission
-        if not self.request.user.has_perm(Permission.CREATE_MEMBER_INVITATION, serializer.validated_data.get('organization')):
-            from rest_framework.exceptions import PermissionDenied
-            raise PermissionDenied(_("You don't have permission to create member invitations."))
-        
-        serializer.save()
-    
-
     def get_serializer_context(self):
         # Get the context from the parent class (including timezone)
         context = super().get_serializer_context()
         # Add your custom context
         context['organization_id'] = self.kwargs['organization_pk']
         return context
+    
+    def list(self, request, *args, **kwargs):
+        queryset = self.filter_queryset(self.get_queryset())
+        page = self.paginate_queryset(queryset)
+        
+        if page is not None:
+            serializer = self.get_serializer(page, many=True)
+            response = self.get_paginated_response(serializer.data)
+            
+            # Get invitation statistics using annotations in a single query
+            stats = MemberInvitation.objects.filter(organization_id=self.kwargs['organization_pk']).aggregate(
+                total_invitations=models.Count('id'),
+                pending_invitations=models.Count('id', filter=models.Q(status=MemberInvitation.PENDING)),
+                accepted_invitations=models.Count('id', filter=models.Q(status=MemberInvitation.ACCEPTED)),
+                rejected_invitations=models.Count('id', filter=models.Q(status=MemberInvitation.REJECTED))
+            )
+            
+            response.data['statistics'] = stats
+            return response
+
+        serializer = self.get_serializer(queryset, many=True)
+        return Response(serializer.data)
     
     
     

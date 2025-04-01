@@ -14,7 +14,6 @@ class MemberSerializer(serializers.ModelSerializer):
     user = SimpleUserSerializer(read_only=True)
     permissions = SimplePermissionSerializer(many=True, read_only=True)
     
-    
     class Meta:
         model = Member
         fields = [

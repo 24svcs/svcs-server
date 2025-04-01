@@ -479,3 +479,118 @@ def generate_single_employee_report(employee):
     
     # Rest of the function remains the same...
 
+class HRPreferences(models.Model):
+    """
+    Model to store organization-specific HR preferences and settings.
+    """
+    organization = models.OneToOneField(Organization, on_delete=models.CASCADE, related_name='hr_preferences')
+    
+    # Attendance Settings
+    grace_period_minutes = models.PositiveIntegerField(
+        default=15,
+        help_text=_("Number of minutes allowed after shift start time before marking attendance as late")
+    )
+    early_check_in_minutes = models.PositiveIntegerField(
+        default=45,
+        help_text=_("Maximum number of minutes before shift start time when employees can check in")
+    )
+    allow_overtime = models.BooleanField(
+        default=True,
+        help_text=_("Whether to allow overtime hours")
+    )
+    max_overtime_hours = models.PositiveIntegerField(
+        default=4,
+        help_text=_("Maximum overtime hours allowed per day")
+    )
+    
+    # Leave Settings
+    default_annual_leave_days = models.PositiveIntegerField(
+        default=20,
+        help_text=_("Default number of annual leave days for new employees")
+    )
+    default_sick_leave_days = models.PositiveIntegerField(
+        default=10,
+        help_text=_("Default number of sick leave days for new employees")
+    )
+    allow_leave_carryover = models.BooleanField(
+        default=True,
+        help_text=_("Whether to allow leave days to be carried over to next year")
+    )
+    max_leave_carryover_days = models.PositiveIntegerField(
+        default=5,
+        help_text=_("Maximum number of leave days that can be carried over")
+    )
+    
+    # Working Hours Settings
+    standard_working_hours = models.PositiveIntegerField(
+        default=8,
+        help_text=_("Standard working hours per day")
+    )
+    standard_working_days = models.PositiveIntegerField(
+        default=5,
+        help_text=_("Standard working days per week")
+    )
+    
+    # Break Settings
+    lunch_break_minutes = models.PositiveIntegerField(
+        default=60,
+        help_text=_("Standard lunch break duration in minutes")
+    )
+    tea_break_minutes = models.PositiveIntegerField(
+        default=15,
+        help_text=_("Standard tea break duration in minutes")
+    )
+    
+    # Notification Settings
+    notify_late_attendance = models.BooleanField(
+        default=True,
+        help_text=_("Whether to notify managers of late attendance")
+    )
+    notify_early_checkout = models.BooleanField(
+        default=True,
+        help_text=_("Whether to notify managers of early checkouts")
+    )
+    notify_leave_requests = models.BooleanField(
+        default=True,
+        help_text=_("Whether to notify managers of leave requests")
+    )
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = _("HR Preferences")
+        verbose_name_plural = _("HR Preferences")
+        indexes = [
+            models.Index(fields=['organization']),
+        ]
+
+    def __str__(self):
+        return f"HR Preferences for {self.organization.name}"
+
+    def clean(self):
+        if self.grace_period_minutes > 60:
+            raise ValidationError(_("Grace period cannot exceed 60 minutes"))
+        
+        if self.early_check_in_minutes > 120:
+            raise ValidationError(_("Early check-in period cannot exceed 120 minutes"))
+        
+        if self.max_overtime_hours > 8:
+            raise ValidationError(_("Maximum overtime hours cannot exceed 8 hours per day"))
+        
+        if self.standard_working_hours > 24:
+            raise ValidationError(_("Standard working hours cannot exceed 24 hours per day"))
+        
+        if self.standard_working_days > 7:
+            raise ValidationError(_("Standard working days cannot exceed 7 days per week"))
+        
+        if self.lunch_break_minutes > 120:
+            raise ValidationError(_("Lunch break cannot exceed 120 minutes"))
+        
+        if self.tea_break_minutes > 30:
+            raise ValidationError(_("Tea break cannot exceed 30 minutes"))
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
