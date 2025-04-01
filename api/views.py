@@ -16,3 +16,6 @@ def refine_attendance_records_view(request):
 def generate_attendance_reports_view(request):
     generate_attendance_reports.delay()
     return HttpResponse('Attendance reports generated')
+
+
+

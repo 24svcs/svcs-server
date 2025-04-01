@@ -160,6 +160,7 @@ class AttendanceModelViewset(TimezoneMixin, ModelViewSet):
     filterset_class = AttendanceFilter
     pagination_class = DefaultPagination
     search_fields = ['employee__first_name__istartswith', 'employee__last_name__istartswith']
+    
     def get_queryset(self):
         queryset = Attendance.objects.select_related('employee').filter(organization_id=self.kwargs['organization_pk']).order_by('date', '-time_in', '-time_out')
         
@@ -167,15 +168,17 @@ class AttendanceModelViewset(TimezoneMixin, ModelViewSet):
         if not self.request.query_params.get('date__gte') and not self.request.query_params.get('date__lte'):
             # Get organization timezone
             organization_timezone = self.get_organization_timezone()
-
             
             # Get current datetime in organization's timezone
             current_datetime = datetime.now(organization_timezone)
             today = current_datetime.date()
             
-            queryset = queryset.filter(date=today)
+            # Convert today's date to UTC for filtering
+            utc_today = current_datetime.astimezone(pytz.UTC).date()
+            queryset = queryset.filter(date=utc_today)
         
         return queryset
+    
     def get_serializer_class(self):
         if self.request.method == 'POST':
             return CheckInOutSerializer
@@ -185,7 +188,6 @@ class AttendanceModelViewset(TimezoneMixin, ModelViewSet):
         context = super().get_serializer_context()
         context['organization_id'] = self.kwargs['organization_pk']
         return context
-    
     
     def get_organization_timezone(self):
         """
@@ -249,11 +251,25 @@ class AttendanceModelViewset(TimezoneMixin, ModelViewSet):
             minutes = int((duration_seconds % 3600) // 60)
             work_duration = f"{hours}h {minutes}m"
         
-        # Get the organization's timezone from preferences
+        # Get the organization's timezone
         organization_timezone = self.get_organization_timezone()
         
-        # Format times in the organization's timezone
-        from django.utils import timezone as tz
+        # Convert UTC times to organization's timezone for display
+        if attendance.time_in:
+            utc_dt_in = datetime.combine(attendance.date, attendance.time_in)
+            utc_dt_in = pytz.UTC.localize(utc_dt_in)
+            local_dt_in = utc_dt_in.astimezone(organization_timezone)
+            time_in_local = local_dt_in.strftime('%H:%M:%S')
+        else:
+            time_in_local = None
+            
+        if attendance.time_out:
+            utc_dt_out = datetime.combine(attendance.date, attendance.time_out)
+            utc_dt_out = pytz.UTC.localize(utc_dt_out)
+            local_dt_out = utc_dt_out.astimezone(organization_timezone)
+            time_out_local = local_dt_out.strftime('%H:%M:%S')
+        else:
+            time_out_local = None
         
         # Format the response
         response_data = {
@@ -265,13 +281,13 @@ class AttendanceModelViewset(TimezoneMixin, ModelViewSet):
             },
             'attendance': {
                 'date': attendance.date.strftime('%Y-%m-%d'),
-                'time_in': attendance.time_in.strftime('%H:%M:%S'),
-                'time_out': attendance.time_out.strftime('%H:%M:%S') if attendance.time_out else None,
+                'time_in': time_in_local,
+                'time_out': time_out_local,
                 'status': attendance.status,
                 'status_display': attendance.get_status_display() if hasattr(attendance, 'get_status_display') else attendance.status,
                 'work_duration': work_duration,
                 'note': attendance.note,
-                'timezone': str(organization_timezone),  # Include timezone info in response
+                'timezone': str(organization_timezone),
             },
             'action': 'check_out' if attendance.time_out else 'check_in',
             'message': _("Successfully checked out.") if attendance.time_out else _("Successfully checked in.")

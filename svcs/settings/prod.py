@@ -79,12 +79,12 @@ LOGGING = {
     'handlers': {
         'console': {
             'class': 'logging.StreamHandler',
-            'level': 'WARNING',   
+            'level': 'INFO',   
             'formatter': 'verbose'
         },
         'file': {
             'class': 'logging.FileHandler',
-            'level': 'WARNING',   
+            'level': 'INFO',   
             'formatter': 'verbose',
             'filename': 'debug.log'
         },
@@ -92,13 +92,13 @@ LOGGING = {
     'loggers': {
         'django': {
             'handlers': ['console', 'file'],
-            'level': 'WARNING',   
+            'level': 'INFO',   
             'propagate': True,
         },
     },
     'root': {
         'handlers': ['console', 'file'],
-        'level': 'WARNING',   
+        'level': 'INFO',   
     },     
     'formatters': {
         'verbose': {

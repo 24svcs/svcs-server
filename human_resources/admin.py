@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import Employee, Attendance, EmployeeSchedule, EmployeeAttendance, HRPreferences
+from .models import Employee, Attendance, EmployeeSchedule, EmployeeAttendance, HRPreferences, EmploymentDetails
 
 
 
@@ -31,3 +31,9 @@ class EmployeeAttendanceAdmin(admin.ModelAdmin):
 @admin.register(HRPreferences)
 class HRPreferencesAdmin(admin.ModelAdmin):
     list_display = ('id', 'organization', 'grace_period_minutes', 'early_check_in_minutes', 'allow_overtime', 'max_overtime_hours', 'default_annual_leave_days', 'default_sick_leave_days', 'allow_leave_carryover', 'max_leave_carryover_days', 'standard_working_hours', 'standard_working_days', 'lunch_break_minutes', 'tea_break_minutes', 'notify_late_attendance', 'notify_early_checkout', 'notify_leave_requests')
+
+
+@admin.register(EmploymentDetails)
+class EmploymentDetailAdmin(admin.ModelAdmin):
+    list_display = ('id', 'employee', 'shift_start', 'shift_end',)
+    list_per_page = 500
