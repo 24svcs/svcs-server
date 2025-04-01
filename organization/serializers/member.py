@@ -58,7 +58,7 @@ class InvitedMemberSerializer(serializers.ModelSerializer):
     invited_by = SimpleUserSerializer(read_only=True)
     class Meta:
         model = MemberInvitation
-        fields = ['id', 'email', 'message', 'invited_at', 'status', 'invited_by']
+        fields = ['id', 'name', 'email', 'message', 'invited_at', 'status', 'invited_by']
         
         
     def to_representation(self, instance):
@@ -99,7 +99,26 @@ class CreateInviteMemberSerializer(serializers.ModelSerializer):
         validated_data['invited_by'] = self.context['request'].user
         return super().create(validated_data)
     
+    def to_representation(self, instance):
+        """
+        Convert the invitation instance to a flatter response structure
+        """
+        data = super().to_representation(instance)
+        
+        # Add flattened data
+        data.update({
+            'invitation_id': instance.id,
+            'organization_id': instance.organization.id,
+            'organization_name': instance.organization.name,
+            'sender_name': f"{instance.invited_by.first_name} {instance.invited_by.last_name}".strip(),
+            'status': instance.status,
+            'invited_at': instance.invited_at.isoformat() if instance.invited_at else None,
+            'response_link': f"/organizations/{instance.organization.id}/invitations/{instance.id}/"
+        })
+        
+        return data
 
+    
 class UpdateInviteMemberSerializer(serializers.ModelSerializer):
     class Meta:
         model = MemberInvitation
