@@ -26,10 +26,10 @@ from organization.filters import OrganizationFilter
 from organization.serializers.member import (
     MemberSerializer,
     UpdateMemberSerializer,
+    CreateInvitationSerializer,
+    UpdateInvitationSerializer,
     InvitedMemberSerializer,
-    CreateInviteMemberSerializer,
-    UpdateInviteMemberSerializer,
-    MemberInvitation
+    Invitation
 )
 
 from organization.filters import MemberFilter, InvitationFilter
@@ -263,12 +263,12 @@ class MemberViewSet(
             from rest_framework.exceptions import ValidationError
             raise ValidationError("Cannot delete the Organization owner's membership.")
             
-        with transaction.atomic():
-            # Delete associated invitation if it exists
-            MemberInvitation.objects.filter(
-                organization=instance.organization,
-                email__iexact=instance.user.email
-            ).delete()
+        # with transaction.atomic():
+        #     # Delete associated invitation if it exists
+        #     MemberInvitation.objects.filter(
+        #         organization=instance.organization,
+        #         email__iexact=instance.user.email
+        #     ).delete()
             
             # Delete the member
             return super().perform_destroy(instance)
@@ -293,29 +293,29 @@ class MemberViewSet(
         return Response(serializer.data)
 
 
-
-
 # ===================== Member Invitation Viewset =====================
-class MemberInvitationViewSet(TimezoneMixin,viewsets.ModelViewSet):
+
+
+class InvitationViewSet(TimezoneMixin,viewsets.ModelViewSet):
     pagination_class = DefaultPagination
     filter_backends = [filters.SearchFilter, DjangoFilterBackend]
     search_fields = ['email']
     filterset_class = InvitationFilter
     
     def get_queryset(self):
-        return MemberInvitation.objects.filter(
+        return Invitation.objects.filter(
             organization_id=self.kwargs['organization_pk']
         ).select_related('organization', 'invited_by')
     
     def get_serializer_class(self):
         if self.request.method == 'POST':
-            return  CreateInviteMemberSerializer
+            return  CreateInvitationSerializer
         elif self.request.method in ['PATCH', 'PUT']:
-            return UpdateInviteMemberSerializer
+            return UpdateInvitationSerializer
         return InvitedMemberSerializer
     
     def perform_destroy(self, instance):
-        if instance.status != MemberInvitation.PENDING:
+        if instance.status != Invitation.PENDING:
             from rest_framework.exceptions import ValidationError
             raise ValidationError("Only pending invitations can be deleted.")
         return super().perform_destroy(instance)
@@ -335,11 +335,11 @@ class MemberInvitationViewSet(TimezoneMixin,viewsets.ModelViewSet):
         if page is not None:
             serializer = self.get_serializer(page, many=True)
             response = self.get_paginated_response(serializer.data)
-            stats = MemberInvitation.objects.filter(organization_id=self.kwargs['organization_pk']).aggregate(
+            stats = Invitation.objects.filter(organization_id=self.kwargs['organization_pk']).aggregate(
                 total_invitations=models.Count('id'),
-                pending_invitations=models.Count('id', filter=models.Q(status=MemberInvitation.PENDING)),
-                accepted_invitations=models.Count('id', filter=models.Q(status=MemberInvitation.ACCEPTED)),
-                rejected_invitations=models.Count('id', filter=models.Q(status=MemberInvitation.REJECTED))
+                pending_invitations=models.Count('id', filter=models.Q(status=Invitation.PENDING)),
+                accepted_invitations=models.Count('id', filter=models.Q(status=Invitation.ACCEPTED)),
+                rejected_invitations=models.Count('id', filter=models.Q(status=Invitation.REJECTED))
             )
             
             response.data['statistics'] = stats

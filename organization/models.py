@@ -147,7 +147,7 @@ class Member(models.Model):
 def default_expiration():
     return now() + timedelta(days=7)
 
-class MemberInvitation(models.Model):
+class Invitation(models.Model):
     PENDING = "PENDING"
     ACCEPTED = "ACCEPTED"
     REJECTED = "REJECTED"
@@ -158,10 +158,9 @@ class MemberInvitation(models.Model):
         (ACCEPTED, "Accepted"),
         (REJECTED, "Rejected"),
         (CREATED, 'Created'),
-        
-        
     ]
     
+    id = models.UUIDField(default=uuid4, primary_key=True, editable=False)
     organization = models.ForeignKey(Organization, on_delete=models.CASCADE, related_name='invitations')
     email = models.EmailField()
     name = models.CharField(max_length=255)

@@ -3,7 +3,7 @@ from rest_framework import serializers
 from django.utils import timezone
 from django.db import transaction
 from core.serializers import SimpleUserSerializer, SimplePermissionSerializer
-from organization.models import Member, MemberInvitation
+from organization.models import Member, Invitation
 import pytz
 from django.utils import timezone as tz
 from api.libs.tz import convert_datetime_to_timezone
@@ -57,7 +57,7 @@ class UpdateMemberSerializer(serializers.ModelSerializer):
 class InvitedMemberSerializer(serializers.ModelSerializer):
     invited_by = SimpleUserSerializer(read_only=True)
     class Meta:
-        model = MemberInvitation
+        model = Invitation
         fields = ['id', 'name', 'email', 'message', 'invited_at', 'status', 'invited_by']
         
         
@@ -84,9 +84,9 @@ class InvitedMemberSerializer(serializers.ModelSerializer):
         return representation
         
 
-class CreateInviteMemberSerializer(serializers.ModelSerializer):
+class CreateInvitationSerializer(serializers.ModelSerializer):
     class Meta:
-        model = MemberInvitation
+        model = Invitation
         fields = ['name','email', 'message']
     
     def validate_email(self, value):
@@ -113,15 +113,15 @@ class CreateInviteMemberSerializer(serializers.ModelSerializer):
             'sender_name': f"{instance.invited_by.first_name} {instance.invited_by.last_name}".strip(),
             'status': instance.status,
             'invited_at': instance.invited_at.isoformat() if instance.invited_at else None,
-            'response_link': f"/organizations/{instance.organization.id}/invitations/{instance.id}/"
+            'response_link': f"?token={instance.id}"
         })
         
         return data
 
     
-class UpdateInviteMemberSerializer(serializers.ModelSerializer):
+class UpdateInvitationSerializer(serializers.ModelSerializer):
     class Meta:
-        model = MemberInvitation
+        model = Invitation    
         fields = ['status', 'is_updated']
         
     def validate(self, attrs):
@@ -129,7 +129,7 @@ class UpdateInviteMemberSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError('Invalid invitation.')
             
         # Existing validation checks
-        if self.instance.status != MemberInvitation.PENDING:
+        if self.instance.status != Invitation.PENDING:
             raise serializers.ValidationError(
                 f'This invitation is no longer valid. Current status: {self.instance.get_status_display()}'
             )
@@ -175,7 +175,7 @@ class UpdateInviteMemberSerializer(serializers.ModelSerializer):
         # Process the actual acceptance in a transaction
         with transaction.atomic():
             try:
-                if new_status == MemberInvitation.ACCEPTED:
+                if new_status == Invitation.ACCEPTED:
                     Member.objects.create(
                         organization=instance.organization,
                         user=current_user,

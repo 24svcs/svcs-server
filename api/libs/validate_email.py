@@ -1,7 +1,7 @@
 from email_validator import validate_email as email_validator, EmailNotValidError
 from rest_framework import serializers
 from django.utils.translation import gettext_lazy as _
-from organization.models import Organization, MemberInvitation
+from organization.models import Organization, Invitation
 
 def check_disposable_email_domain(normalized_email):
     disposable_domains = {
@@ -51,10 +51,10 @@ def validate_email_invitation(value, organization_id, instance=None):
         check_disposable_email_domain(normalized_email)
         
         # Check for existing invitation with same email for the same organization
-        query = MemberInvitation.objects.filter(
+        query = Invitation.objects.filter(
             email__iexact=normalized_email,
             organization_id=organization_id,
-            status__in=[MemberInvitation.PENDING, MemberInvitation.ACCEPTED]
+            status__in=[Invitation.PENDING, Invitation.ACCEPTED, Invitation.CREATED]
         )
         
         if instance:

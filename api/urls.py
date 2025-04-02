@@ -1,7 +1,7 @@
 from django.urls import path, include
 from rest_framework_nested import routers
 from core.views import LanguageViewSet, UserViewSet, UserInvitationViewSet
-from organization.views import OrganizationViewSet, MemberViewSet, MemberInvitationViewSet
+from organization.views import OrganizationViewSet, MemberViewSet, InvitationViewSet
 from human_resources.views import (
     DepartmentModelViewset, 
     PositionModelViewset, 
@@ -9,6 +9,8 @@ from human_resources.views import (
     AttendanceModelViewset, 
     EmployeeAttendanceStatsViewSet,
 )
+
+
 
 from api.views import notify_customers_view, refine_attendance_records_view, generate_attendance_reports_view
 
@@ -29,7 +31,7 @@ member_router = routers.NestedDefaultRouter(router, r'organizations', lookup='or
 member_router.register(r'members', MemberViewSet, basename='member')
 
 invitation_router = routers.NestedDefaultRouter(router, r'organizations', lookup='organization')
-invitation_router.register(r'invitations', MemberInvitationViewSet, basename='invitation')
+invitation_router.register(r'invitations', InvitationViewSet, basename='invitation')
 
 department_router = routers.NestedDefaultRouter(router, r'organizations', lookup='organization')
 department_router.register(r'departments', DepartmentModelViewset, basename='department')

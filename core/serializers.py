@@ -1,6 +1,6 @@
 from rest_framework import serializers
 from .models import Permission, User, Language
-from organization.models import MemberInvitation, Member
+from organization.models import  Invitation, Member
 from django.utils import timezone
 from django.db import transaction
 import pytz
@@ -51,7 +51,7 @@ class LanguageSerializer(serializers.ModelSerializer):
 class InvitationSerializer(serializers.ModelSerializer):
     invited_by = SimpleUserSerializer(read_only=True)
     class Meta:
-        model = MemberInvitation
+        model = Invitation
         fields = ['id', 'name', 'email', 'message', 'invited_at', 'status', 'invited_by']
         
         
@@ -78,13 +78,13 @@ class InvitationSerializer(serializers.ModelSerializer):
         
 
 
-# ===============================
-# Accept Invitation Serializer
-# ===============================
+# # ===============================
+# # Accept Invitation Serializer
+# # ===============================
 
 class AcceptInvitationSerializer(serializers.ModelSerializer):
     class Meta:
-        model = MemberInvitation
+        model = Invitation
         fields = []  # We don't need any fields since we'll hardcode the status
         
     def validate(self, attrs):
@@ -96,7 +96,7 @@ class AcceptInvitationSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError('This invitation has expired.')
             
         # Existing validation checks
-        if self.instance.status != MemberInvitation.PENDING:
+        if self.instance.status != Invitation.PENDING:
             raise serializers.ValidationError(
                 f'This invitation is no longer valid. Current status: {self.instance.get_status_display()}'
             )
@@ -157,7 +157,7 @@ class AcceptInvitationSerializer(serializers.ModelSerializer):
                 member.clean()  # This will raise ValidationError if limit is reached
                 member.save()
                 
-                instance.status = MemberInvitation.ACCEPTED
+                instance.status = Invitation.ACCEPTED
                 instance.is_updated = True
                 instance.save()
                 
@@ -178,7 +178,7 @@ class AcceptInvitationSerializer(serializers.ModelSerializer):
 
 class RejectInvitationSerializer(serializers.ModelSerializer):
     class Meta:
-        model = MemberInvitation
+        model = Invitation
         fields = []  # We don't need any fields since we'll hardcode the status
         
     def validate(self, attrs):
@@ -190,7 +190,7 @@ class RejectInvitationSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError('This invitation has expired.')
             
         # Existing validation checks
-        if self.instance.status != MemberInvitation.PENDING:
+        if self.instance.status != Invitation.PENDING:
             raise serializers.ValidationError(
                 f'This invitation is no longer valid. Current status: {self.instance.get_status_display()}'
             )
@@ -223,7 +223,7 @@ class RejectInvitationSerializer(serializers.ModelSerializer):
         # Process the rejection in a transaction
         with transaction.atomic():
             try:
-                instance.status = MemberInvitation.REJECTED
+                instance.status = Invitation.REJECTED
                 instance.is_updated = True
                 instance.save()
                 

@@ -1,5 +1,5 @@
 from django_filters.rest_framework import FilterSet
-from .models import Organization, Member, MemberInvitation
+from .models import Organization, Member, Invitation
 
 class OrganizationFilter(FilterSet):
     class Meta:
@@ -21,7 +21,7 @@ class MemberFilter(FilterSet):
 
 class InvitationFilter(FilterSet):
     class Meta:
-        model = MemberInvitation
+        model = Invitation
         fields = {
             'status': ['exact'],
         }

@@ -5,26 +5,25 @@ from rest_framework.decorators import api_view, permission_classes, action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework import  filters
 from core.pagination import DefaultPagination
-from organization.models import MemberInvitation
+
 
 
 import pytz
-from django.db import models
 from core.serializers import(
-    SimpleUserSerializer,
     Permission,
     User,
     Language,
     LanguageSerializer, 
     PermissionSerializer,
-    InvitationSerializer,
+    UserSerializer,
     AcceptInvitationSerializer,
     RejectInvitationSerializer,
-    UserSerializer
+    InvitationSerializer,
+    Invitation
 )
 from core.mixins import TimezoneMixin
 from rest_framework import mixins
-    
+from django.db import models
 class PermissionViewSet(viewsets.ReadOnlyModelViewSet):
     pagination_class = DefaultPagination
     queryset = Permission.objects.all()
@@ -107,7 +106,7 @@ class UserInvitationViewSet(TimezoneMixin,
         return InvitationSerializer
     
     def get_queryset(self):
-        return MemberInvitation.objects.filter(
+        return Invitation.objects.filter(
             email=self.request.user.email
         ).select_related('organization', 'invited_by')
     
@@ -147,11 +146,11 @@ class UserInvitationViewSet(TimezoneMixin,
         if page is not None:
             serializer = self.get_serializer(page, many=True)
             response = self.get_paginated_response(serializer.data)
-            stats = MemberInvitation.objects.filter(email=self.request.user.email).aggregate(
+            stats = Invitation.objects.filter(email=self.request.user.email).aggregate(
                 total_invitations=models.Count('id'),
-                pending_invitations=models.Count('id', filter=models.Q(status=MemberInvitation.PENDING)),
-                accepted_invitations=models.Count('id', filter=models.Q(status=MemberInvitation.ACCEPTED)),
-                rejected_invitations=models.Count('id', filter=models.Q(status=MemberInvitation.REJECTED))
+                pending_invitations=models.Count('id', filter=models.Q(status=Invitation.PENDING)),
+                accepted_invitations=models.Count('id', filter=models.Q(status=Invitation.ACCEPTED)),
+                rejected_invitations=models.Count('id', filter=models.Q(status=Invitation.REJECTED))
             )
             
             response.data['statistics'] = stats
