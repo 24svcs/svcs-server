@@ -1,6 +1,6 @@
 from django.urls import path, include
 from rest_framework_nested import routers
-from core.views import LanguageViewSet
+from core.views import LanguageViewSet, UserViewSet, UserInvitationViewSet
 from organization.views import OrganizationViewSet, MemberViewSet, MemberInvitationViewSet
 from human_resources.views import (
     DepartmentModelViewset, 
@@ -16,11 +16,17 @@ from api.views import notify_customers_view, refine_attendance_records_view, gen
 router = routers.DefaultRouter()
 router.register('languages', LanguageViewSet, basename='languages')
 router.register(r'organizations', OrganizationViewSet, basename='organizations')
+router.register('users', UserViewSet, basename='users' )
+
+
+
+user_invitation_router = routers.NestedDefaultRouter(router, r'users', lookup='user')
+user_invitation_router.register(r'invitations', UserInvitationViewSet, basename='invitation')
+
+
+
 member_router = routers.NestedDefaultRouter(router, r'organizations', lookup='organization')
 member_router.register(r'members', MemberViewSet, basename='member')
-
-
-
 
 invitation_router = routers.NestedDefaultRouter(router, r'organizations', lookup='organization')
 invitation_router.register(r'invitations', MemberInvitationViewSet, basename='invitation')
@@ -54,6 +60,7 @@ urlpatterns = [
      path(r'', include(employee_router.urls)),
      path(r'', include(attendance_router.urls)),
      path(r'', include(employee_attendance_stats_router.urls)),
+     path(r'', include(user_invitation_router.urls)),
      path(r'notify-customers/', notify_customers_view, name='notify-customers'),
      path(r'refine-attendance-records/', refine_attendance_records_view, name='refine-attendance-records'),
      path(r'generate-attendance-reports/', generate_attendance_reports_view, name='generate-attendance-reports'),

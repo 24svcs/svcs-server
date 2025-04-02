@@ -151,11 +151,15 @@ class MemberInvitation(models.Model):
     PENDING = "PENDING"
     ACCEPTED = "ACCEPTED"
     REJECTED = "REJECTED"
+    CREATED = 'CREATED'
     
     INVITATION_STATUS_CHOICES = [
         (PENDING, "Pending"),
         (ACCEPTED, "Accepted"),
         (REJECTED, "Rejected"),
+        (CREATED, 'Created'),
+        
+        
     ]
     
     organization = models.ForeignKey(Organization, on_delete=models.CASCADE, related_name='invitations')
@@ -173,7 +177,6 @@ class MemberInvitation(models.Model):
     
     class Meta:
         verbose_name_plural = "Invitations"
-        
         constraints = [
             models.UniqueConstraint(
                 fields=['organization', 'email'],

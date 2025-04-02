@@ -37,19 +37,8 @@ from django.db import models
 
 
 
-class MyOrganizationViewSet(viewsets.GenericViewSet, mixins.RetrieveModelMixin, mixins.ListModelMixin):
-    
-    permission_classes = [IsAuthenticated]
-    pagination_class = DefaultPagination
 
-    
-    def get_queryset(self):
-        user_id = self.request.user.id
-        return Organization.objects.prefetch_related('members').filter(user_id=user_id).only('id', 'name', 'name_space', 'email', 'logo_url').order_by('name')
-    
-    
-    serializer_class = SimpleOrganizationSerializer
-    
+
 
 
 class OrganizationViewSet(TimezoneMixin, viewsets.ModelViewSet):
@@ -304,6 +293,9 @@ class MemberViewSet(
         return Response(serializer.data)
 
 
+
+
+# ===================== Member Invitation Viewset =====================
 class MemberInvitationViewSet(TimezoneMixin,viewsets.ModelViewSet):
     pagination_class = DefaultPagination
     filter_backends = [filters.SearchFilter, DjangoFilterBackend]
@@ -311,7 +303,6 @@ class MemberInvitationViewSet(TimezoneMixin,viewsets.ModelViewSet):
     filterset_class = InvitationFilter
     
     def get_queryset(self):
-        # Optimize query with select_related
         return MemberInvitation.objects.filter(
             organization_id=self.kwargs['organization_pk']
         ).select_related('organization', 'invited_by')
@@ -344,8 +335,6 @@ class MemberInvitationViewSet(TimezoneMixin,viewsets.ModelViewSet):
         if page is not None:
             serializer = self.get_serializer(page, many=True)
             response = self.get_paginated_response(serializer.data)
-            
-            # Get invitation statistics using annotations in a single query
             stats = MemberInvitation.objects.filter(organization_id=self.kwargs['organization_pk']).aggregate(
                 total_invitations=models.Count('id'),
                 pending_invitations=models.Count('id', filter=models.Q(status=MemberInvitation.PENDING)),
