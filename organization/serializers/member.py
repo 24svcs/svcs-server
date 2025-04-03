@@ -1,9 +1,6 @@
 from rest_framework import serializers
-
-from django.utils import timezone
-from django.db import transaction
 from core.serializers import SimpleUserSerializer, SimplePermissionSerializer
-from organization.models import Member, Invitation
+from organization.models import Member, Invitation, Organization
 import pytz
 from django.utils import timezone as tz
 from api.libs.tz import convert_datetime_to_timezone
@@ -54,12 +51,23 @@ class UpdateMemberSerializer(serializers.ModelSerializer):
         return super().update(instance, validated_data)
 
     
-class InvitedMemberSerializer(serializers.ModelSerializer):
-    invited_by = SimpleUserSerializer(read_only=True)
+class InvitationSerializer(serializers.ModelSerializer):
+    inviter_name = serializers.SerializerMethodField()
+    organization_name = serializers.SerializerMethodField()
+    
     class Meta:
         model = Invitation
-        fields = ['id', 'name', 'email', 'message', 'invited_at', 'status', 'invited_by']
+        fields = ['id', 'name', 'email', 'message', 'invited_at', 'status', 'inviter_name', 'organization_name']
+    
+    def get_inviter_name(self, obj):
+        if obj.invited_by:
+            return f"{obj.invited_by.first_name} {obj.invited_by.last_name}".strip()
+        return ""
         
+    def get_organization_name(self, obj):
+        if obj.organization:
+            return obj.organization.name
+        return ""
         
     def to_representation(self, instance):
         """
@@ -93,6 +101,43 @@ class CreateInvitationSerializer(serializers.ModelSerializer):
         organization_id = self.context['organization_id']
         return validate_email_invitation(value, organization_id)
     
+    def validate(self, attrs):
+        organization_id = self.context['organization_id']
+        
+        # Check if organization exists
+        try:
+            organization = Organization.objects.get(id=organization_id)
+        except Organization.DoesNotExist:
+            raise serializers.ValidationError('The organization does not exist.')
+            
+        # Check organization member limit
+        current_member_count = organization.members.count()
+        member_limit = organization.get_member_limit()
+        
+        if current_member_count >= member_limit:
+            raise serializers.ValidationError(
+                f'This organization has reached its member limit of {member_limit} members.'
+            )
+            
+        # Check if user is already a member
+        email = attrs.get('email')
+        if Member.objects.filter(organization=organization, user__email=email).exists():
+            raise serializers.ValidationError(
+                'This user is already a member of this organization.'
+            )
+            
+        # Check if there's already a pending invitation for this email
+        if Invitation.objects.filter(
+            organization=organization,
+            email=email,
+            status=Invitation.PENDING
+        ).exists():
+            raise serializers.ValidationError(
+                'An invitation has already been sent to this email address.'
+            )
+            
+        return attrs
+    
     def create(self, validated_data):
         organization_id = self.context['organization_id']
         validated_data['organization_id'] = organization_id
@@ -113,88 +158,7 @@ class CreateInvitationSerializer(serializers.ModelSerializer):
             'sender_name': f"{instance.invited_by.first_name} {instance.invited_by.last_name}".strip(),
             'status': instance.status,
             'invited_at': instance.invited_at.isoformat() if instance.invited_at else None,
-            'response_link': f"?token={instance.id}"
+            'response_link': f"{instance.id}"
         })
         
         return data
-
-    
-class UpdateInvitationSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Invitation    
-        fields = ['status', 'is_updated']
-        
-    def validate(self, attrs):
-        if not self.instance:
-            raise serializers.ValidationError('Invalid invitation.')
-            
-        # Existing validation checks
-        if self.instance.status != Invitation.PENDING:
-            raise serializers.ValidationError(
-                f'This invitation is no longer valid. Current status: {self.instance.get_status_display()}'
-            )
-            
-        if self.instance.is_updated:
-            raise serializers.ValidationError('This invitation has already been processed.')
-            
-        return super().validate(attrs)
-
-    def update(self, instance, validated_data):
-        new_status = validated_data.get('status')
-        current_user = self.context['request'].user
-        
-        # Check if user is authenticated
-        if not current_user.is_authenticated:
-            raise serializers.ValidationError('You must be logged in to accept invitations.')
-        
-        # Verify email case-insensitively and after stripping whitespace
-        if current_user.email.lower().strip() != instance.email.lower().strip():
-            raise serializers.ValidationError(
-                'You cannot accept an invitation that was sent to a different email address.'
-            )
-        
-        # Check if  organization still exists
-        try:
-            organization = instance.organization
-        except organization.DoesNotExist:
-            instance.delete()
-            raise serializers.ValidationError('The organization associated with this invitation no longer exists.')
-        
-        # Check if user is already a member
-        existing_member = Member.objects.filter(
-            organization=instance.organization,
-            user=current_user
-        ).first()
-        
-        if existing_member:
-            instance.delete()
-            raise serializers.ValidationError(
-                'You are already a member of this organization. Invitation has been removed.'
-            )
-        
-        # Process the actual acceptance in a transaction
-        with transaction.atomic():
-            try:
-                if new_status == Invitation.ACCEPTED:
-                    Member.objects.create(
-                        organization=instance.organization,
-                        user=current_user,
-                        status=Member.ACTIVE,
-                        joined_at=timezone.now()
-                    )
-                
-                instance.status = new_status
-                instance.is_updated = True
-                instance.save()
-                
-                return instance
-                
-            except Exception as e:
-                raise serializers.ValidationError(
-                    f'Error processing invitation: {str(e)}'
-                )
-
-
-
-
-

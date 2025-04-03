@@ -4,7 +4,23 @@ from rest_framework.response import Response
 
 class DefaultPagination(PageNumberPagination):
     page_size = 10
-    page_size_query_param = 'page_size'
+    
+    def get_page_number(self, request, paginator):
+        """
+        Override to handle invalid page numbers by returning page 1
+        """
+        page_number = request.query_params.get(self.page_query_param, 1)
+        if page_number in self.last_page_strings:
+            page_number = paginator.num_pages
+        try:
+            page_number = int(page_number)
+            if page_number < 1:
+                return 1
+            if page_number > paginator.num_pages and paginator.num_pages > 0:
+                return 1
+            return page_number
+        except (TypeError, ValueError):
+            return 1
     
     def get_paginated_response(self, data):
         """

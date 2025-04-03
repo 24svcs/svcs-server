@@ -24,4 +24,5 @@ class InvitationFilter(FilterSet):
         model = Invitation
         fields = {
             'status': ['exact'],
+            'invited_at': ['gte', 'lte'],
         }

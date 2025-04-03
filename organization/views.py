@@ -27,18 +27,12 @@ from organization.serializers.member import (
     MemberSerializer,
     UpdateMemberSerializer,
     CreateInvitationSerializer,
-    UpdateInvitationSerializer,
-    InvitedMemberSerializer,
+    InvitationSerializer,
     Invitation
 )
 
 from organization.filters import MemberFilter, InvitationFilter
 from django.db import models
-
-
-
-
-
 
 
 class OrganizationViewSet(TimezoneMixin, viewsets.ModelViewSet):
@@ -296,10 +290,17 @@ class MemberViewSet(
 # ===================== Member Invitation Viewset =====================
 
 
-class InvitationViewSet(TimezoneMixin,viewsets.ModelViewSet):
+class InvitationViewSet(
+    TimezoneMixin,
+    viewsets.GenericViewSet,
+    mixins.ListModelMixin,
+    mixins.DestroyModelMixin,
+    mixins.CreateModelMixin,
+    mixins.RetrieveModelMixin
+):
     pagination_class = DefaultPagination
     filter_backends = [filters.SearchFilter, DjangoFilterBackend]
-    search_fields = ['email']
+    search_fields = ['email__istartswith', 'invited_by__first_name__istartswith', 'invited_by__last_name__istartswith']
     filterset_class = InvitationFilter
     
     def get_queryset(self):
@@ -310,9 +311,7 @@ class InvitationViewSet(TimezoneMixin,viewsets.ModelViewSet):
     def get_serializer_class(self):
         if self.request.method == 'POST':
             return  CreateInvitationSerializer
-        elif self.request.method in ['PATCH', 'PUT']:
-            return UpdateInvitationSerializer
-        return InvitedMemberSerializer
+        return InvitationSerializer
     
     def perform_destroy(self, instance):
         if instance.status != Invitation.PENDING:
