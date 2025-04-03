@@ -8,16 +8,59 @@ from api.libs.validate_email import validate_email_invitation
 
 
 class MemberSerializer(serializers.ModelSerializer):
-    user = SimpleUserSerializer(read_only=True)
-    permissions = SimplePermissionSerializer(many=True, read_only=True)
+    user_email = serializers.SerializerMethodField()
+    user_username = serializers.SerializerMethodField()
+    user_first_name = serializers.SerializerMethodField()
+    user_last_name = serializers.SerializerMethodField()
+    user_image_url = serializers.SerializerMethodField()
+    permission_names = serializers.SerializerMethodField()
+    role = serializers.SerializerMethodField()
     
     class Meta:
         model = Member
         fields = [
-            'id', 'user',
-            'is_owner', 'is_admin', 'status',
-            'joined_at', 'last_active_at', 'permissions'
+            'id', 'user_email', 'user_username', 'user_first_name', 'user_last_name', 'user_image_url',
+            'role', 'status',
+            'joined_at', 'last_active_at', 'permission_names'
         ]
+    
+    def get_user_email(self, obj):
+        if obj.user:
+            return obj.user.email
+        return ""
+    
+    def get_user_username(self, obj):
+        if obj.user:
+            return obj.user.username
+        return ""
+    
+    def get_user_first_name(self, obj):
+        if obj.user:
+            return obj.user.first_name
+        return ""
+    
+    def get_user_last_name(self, obj):
+        if obj.user:
+            return obj.user.last_name
+        return ""
+    
+    def get_user_image_url(self, obj):
+        if obj.user:
+            return obj.user.image_url
+        return ""
+    
+    def get_permission_names(self, obj):
+        if obj.permissions:
+            return [permission.name for permission in obj.permissions.all()]
+        return []
+    
+    def get_role(self, obj):
+        if obj.is_owner:
+            return "Owner"
+        elif obj.is_admin:
+            return "Admin"
+        else:
+            return "Member"
         
     def validate_status(self, value):
         if value not in [Member.ACTIVE, Member.INACTIVE]:

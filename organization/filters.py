@@ -16,6 +16,7 @@ class MemberFilter(FilterSet):
         model = Member
         fields = {
             'status': ['exact'],
+            'joined_at': ['gte', 'lte'],
         }
 
 
