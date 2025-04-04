@@ -16,7 +16,7 @@ class ClientSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'name', 'email', 'phone', 'company_name', 
             'tax_number', 'is_active', 'total_paid', 
-            'total_outstanding', 'address', 'created_at'
+            'total_outstanding', 'address', 'created_at',
         ]
         read_only_fields = ['created_at']
     
@@ -30,7 +30,14 @@ class ClientSerializer(serializers.ModelSerializer):
         if obj.address:
             return f"{obj.address.street}, {obj.address.city}, {obj.address.state} {obj.address.zip_code}, {obj.address.country}"
         return None
-    
+
+
+
+class CreateClientSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Client
+        fields = ['name', 'email', 'phone', 'company_name', 'tax_number', 'is_active']
+        
     def validate_phone(self, value):
         # Basic phone number validation
         if not value.replace('+', '').replace('-', '').replace(' ', '').isdigit():
@@ -46,6 +53,19 @@ class ClientSerializer(serializers.ModelSerializer):
         organization_id = self.context['organization_id']
         validated_data['organization_id'] = organization_id
         return super().create(validated_data)
+    
+    
+    def update(self, instance, validated_data):
+        instance.name = validated_data.get('name', instance.name)
+        instance.email = validated_data.get('email', instance.email)
+        instance.phone = validated_data.get('phone', instance.phone)
+        instance.company_name = validated_data.get('company_name', instance.company_name)
+        instance.tax_number = validated_data.get('tax_number', instance.tax_number)
+        instance.is_active = validated_data.get('is_active', instance.is_active)
+        instance.save()
+        return instance
+    
+
 
 
 class InvoiceItemSerializer(serializers.ModelSerializer):
