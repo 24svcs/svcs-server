@@ -25,6 +25,8 @@ from .serializers import EmployeeAttendanceStatsSerializer
 from django.db import models
 from .models import EmployeeAttendance
 from rest_framework.viewsets import ReadOnlyModelViewSet
+
+
 class DepartmentModelViewset(ModelViewSet):
     pagination_class = DefaultPagination
     filter_backends = [filters.SearchFilter, DjangoFilterBackend]

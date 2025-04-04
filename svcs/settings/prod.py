@@ -1,9 +1,7 @@
 from .common import *
-
 from urllib.parse import urlparse
 from decouple import config
 import os
-
 
 TIME_ZONE = 'UTC'
 

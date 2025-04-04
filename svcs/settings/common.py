@@ -21,7 +21,8 @@ INSTALLED_APPS = [
     'phonenumber_field',
     'api',
     'organization',
-    'human_resources'
+    'human_resources',
+    'finance'
 ]
 
 MIDDLEWARE = [
