@@ -106,77 +106,82 @@ class SimpleInvoiceItemSerializer(serializers.ModelSerializer):
 
 # ================================ Payment Serializers ================================
 class PaymentSerializer(serializers.ModelSerializer):
+    invoice_number = serializers.CharField(source='invoice.invoice_number', read_only=True)
+    client_name = serializers.CharField(source='client.name', read_only=True)
+    pending_amount = serializers.SerializerMethodField()
+    
     class Meta:
         model = Payment
         fields = [
-            'id', 'client', 'invoice', 'amount', 'payment_date',
+            'id', 'invoice_number', 'client_name', 'amount', 'payment_date',
             'payment_method', 'status', 'transaction_id', 'notes',
-            'created_at'
+            'created_at', 'pending_amount'
         ]
         read_only_fields = ['created_at', 'status']
+    
+    def get_pending_amount(self, obj):
+        return obj.pending_amount  # This now uses the property from the model
+
+
+class CreatePaymentSerializer(serializers.ModelSerializer):
+    invoice_id = serializers.IntegerField()
+    
+    class Meta:
+        model = Payment
+        fields = ['invoice_id', 'amount', 'payment_method', 'notes']
+    
+    def validate_invoice_id(self, value):
+        try:
+            invoice = Invoice.objects.select_related('client').get(id=value)
+            
+            # Check if invoice can accept payments
+            if invoice.status not in ['PENDING', 'OVERDUE', 'PARTIALLY_PAID']:
+                raise serializers.ValidationError(
+                    f"Cannot add payment to invoice in {invoice.status} status. "
+                    "Invoice must be PENDING, OVERDUE, or PARTIALLY_PAID"
+                )
+            
+            return value
+        except Invoice.DoesNotExist:
+            raise serializers.ValidationError("Invalid invoice ID")
     
     def validate_amount(self, value):
         if value <= Decimal('0'):
             raise serializers.ValidationError("Payment amount must be greater than 0")
         return value
     
-    def validate_payment_date(self, value):
-        if value > timezone.now().date():
-            raise serializers.ValidationError("Payment date cannot be in the future")
-        return value
-    
     def validate(self, data):
-        invoice = data.get('invoice')
-        if not invoice:
-            raise serializers.ValidationError({
-                "invoice": "Invoice is required"
-            })
+        # Get invoice and validate payment amount
+        invoice = Invoice.objects.get(id=data['invoice_id'])
         
-        # Check if invoice is in a valid state for payment
-        valid_states = ['PENDING', 'OVERDUE', 'PARTIALLY_PAID']
-        if invoice.status not in valid_states:
+        # Check if payment amount exceeds remaining balance
+        if data['amount'] > invoice.balance_due:
             raise serializers.ValidationError({
-                "invoice": f"Cannot add payment to invoice in {invoice.status} status. Invoice must be in one of these states: {', '.join(valid_states)}"
-            })
-        
-        # Validate payment amount doesn't exceed remaining balance
-        remaining_balance = invoice.balance_due
-        if data.get('amount') > remaining_balance:
-            raise serializers.ValidationError({
-                "amount": f"Payment amount ({data.get('amount')}) cannot exceed remaining balance ({remaining_balance})"
+                "amount": f"Payment amount ({data['amount']}) cannot exceed remaining balance ({invoice.balance_due})"
             })
         
         return data
     
     @transaction.atomic
     def create(self, validated_data):
-        # Set initial payment status
-        validated_data['status'] = 'PENDING'
-        payment = super().create(validated_data)
+        invoice_id = validated_data.pop('invoice_id')
+        invoice = Invoice.objects.select_related('client').get(id=invoice_id)
         
-        # Update invoice status based on payment
-        self._update_invoice_status(payment)
+        # Create payment with invoice's organization
+        payment = Payment.objects.create(
+            invoice=invoice,
+            client=invoice.client,
+            payment_date=timezone.now().date(),
+            status='PENDING',
+            organization_id=invoice.organization_id,
+            **validated_data
+        )
         
         return payment
     
-    def _update_invoice_status(self, payment):
-        invoice = payment.invoice
-        
-        # Calculate total payments including the new one
-        total_payments = sum(
-            payment.amount for payment in Payment.objects.filter(
-                invoice=invoice,
-                status='COMPLETED'
-            )
-        ) + payment.amount
-        
-        # Update invoice status based on payment amount
-        if total_payments >= invoice.total_amount:
-            invoice.status = 'PAID'
-        elif total_payments > 0:
-            invoice.status = 'PARTIALLY_PAID'  # Changed from PENDING to PARTIALLY_PAID
-        
-        invoice.save()
+    def to_representation(self, instance):
+        # Use the detailed PaymentSerializer for the response
+        return PaymentSerializer(instance).data
 
 
 # ================================ Invoice Serializers ================================
@@ -186,25 +191,27 @@ class InvoiceSerializer(serializers.ModelSerializer):
     tax_amount = serializers.SerializerMethodField()
     total_amount = serializers.SerializerMethodField()
     paid_amount = serializers.SerializerMethodField()
+    pending_amount = serializers.SerializerMethodField()
     balance_due = serializers.SerializerMethodField()
     is_fully_paid = serializers.SerializerMethodField()
     days_overdue = serializers.SerializerMethodField()
     client_name = serializers.SerializerMethodField()
+    
     class Meta:
         model = Invoice
         fields = [
             'id', 'invoice_number', 'client_name', 'issue_date', 'due_date',
             'status', 'tax_rate', 'notes',
             'subtotal_amount', 'tax_amount', 'total_amount',
-            'paid_amount', 'balance_due', 'is_fully_paid',
+            'paid_amount', 'pending_amount', 'balance_due', 'is_fully_paid',
             'days_overdue', 'created_at', 'updated_at','items', 
         ]
         read_only_fields = [
             'invoice_number', 'created_at', 'updated_at',
             'subtotal_amount', 'tax_amount', 'total_amount',
-            'paid_amount', 'balance_due', 'is_fully_paid'
+            'paid_amount', 'pending_amount', 'balance_due', 'is_fully_paid'
         ]
-        
+    
     def get_client_name(self, obj):
         return obj.client.name
     
@@ -219,6 +226,9 @@ class InvoiceSerializer(serializers.ModelSerializer):
     
     def get_paid_amount(self, obj):
         return obj.paid_amount
+    
+    def get_pending_amount(self, obj):
+        return obj.pending_amount
     
     def get_balance_due(self, obj):
         return obj.balance_due
@@ -320,20 +330,7 @@ class CreateInvoiceSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({
                 "items": "Invoice must have at least one item"
             })
-        
-        # Check for overdue invoices
-        client_id = data.get('client')
-        if client_id:
-            overdue_invoices = Invoice.objects.filter(
-                client_id=client_id,
-                status='OVERDUE',
-                due_date__lt=timezone.now().date()
-            )
-            if overdue_invoices.exists():
-                raise serializers.ValidationError({
-                    "client": "Client has overdue invoices that need to be settled first"
-                })
-        
+            
         return data
     
     def generate_invoice_number(self):
@@ -472,5 +469,45 @@ class UpdateInvoiceSerializer(serializers.ModelSerializer):
         
         instance.save()
         return instance
+        
+
+class UpdatePaymentSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Payment
+        fields = ['status']
+        read_only_fields = ['amount', 'payment_date', 'payment_method', 'transaction_id', 'notes']
+    
+    def validate_status(self, value):
+        current_status = self.instance.status
+        
+        # Define valid status transitions
+        VALID_TRANSITIONS = {
+            'PENDING': ['COMPLETED', 'FAILED'],  # Pending can move to completed or failed
+            'COMPLETED': ['REFUNDED'],           # Completed can only be refunded
+            'FAILED': [],                        # Failed is terminal state
+            'REFUNDED': []                       # Refunded is terminal state
+        }
+        
+        # Check if the current status can transition to the new status
+        if value not in VALID_TRANSITIONS.get(current_status, []):
+            raise serializers.ValidationError(
+                f"Cannot change status from {current_status} to {value}. "
+                f"Valid transitions are: {', '.join(VALID_TRANSITIONS[current_status])}"
+            )
+        
+        return value
+    
+    def update(self, instance, validated_data):
+        new_status = validated_data.get('status')
+        
+        with transaction.atomic():
+            # Update payment status
+            instance.status = new_status
+            instance.save()
+            
+            # Update invoice status
+            instance.invoice.update_status_based_on_payments()
+            
+            return instance
         
         

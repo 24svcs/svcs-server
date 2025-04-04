@@ -1,14 +1,15 @@
 from rest_framework.viewsets import ModelViewSet, GenericViewSet
+from rest_framework.mixins import CreateModelMixin, RetrieveModelMixin
 from .serializers import (
     Client, ClientSerializer, CreateClientSerializer,
     Invoice, InvoiceSerializer, CreateInvoiceSerializer, UpdateInvoiceSerializer,
-    Payment, PaymentSerializer
+    Payment, PaymentSerializer, CreatePaymentSerializer, UpdatePaymentSerializer
 )
 from rest_framework.permissions import IsAuthenticated
 from api.pagination import DefaultPagination
 from django_filters.rest_framework import DjangoFilterBackend
-from .filters import ClientFilter
-from django.db import models
+from .filters import ClientFilter, InvoiceFilter
+from django.db import models, transaction
 from django.db.models import F, Q, Sum, Avg, Count, DecimalField, Value
 from django.db.models.functions import Coalesce
 from rest_framework.response import Response
@@ -16,10 +17,12 @@ from django.utils import timezone
 from datetime import timedelta
 from rest_framework.decorators import action
 from rest_framework import status
+from rest_framework import  filters
+from decimal import Decimal     
 
 class ClientModelViewset(ModelViewSet):
     pagination_class = DefaultPagination
-    filter_backends = [DjangoFilterBackend]
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter]
     filterset_class = ClientFilter
     search_fields = ['name__istartswith', 'email__istartswith', 'phone__exact', 'company_name__istartswith', 'tax_number__istartswith']
     ordering_fields = ['name', 'email', 'phone', 'company_name', 'tax_number']
@@ -74,8 +77,10 @@ class ClientModelViewset(ModelViewSet):
     
 class InvoiceViewSet(ModelViewSet):
     pagination_class = DefaultPagination
-    filter_backends = [DjangoFilterBackend]
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter]
+    search_fields = ['invoice_number__istartswith', 'client__name__istartswith', 'client__email__istartswith', 'client__phone__exact', 'client__company_name__istartswith', 'client__tax_number__istartswith']
     permission_classes = [IsAuthenticated]
+    filterset_class = InvoiceFilter
     
     def get_queryset(self):
         return Invoice.objects.select_related(
@@ -129,6 +134,14 @@ class InvoiceViewSet(ModelViewSet):
                         output_field=DecimalField(max_digits=10, decimal_places=2)
                     ),
                     Value(0, output_field=DecimalField(max_digits=10, decimal_places=2))
+                ),
+                pending=Coalesce(
+                    Sum(
+                        'payments__amount',
+                        filter=Q(payments__status='PENDING'),
+                        output_field=DecimalField(max_digits=10, decimal_places=2)
+                    ),
+                    Value(0, output_field=DecimalField(max_digits=10, decimal_places=2))
                 )
             ).annotate(
                 balance=F('total') - F('paid')
@@ -159,6 +172,7 @@ class InvoiceViewSet(ModelViewSet):
                 ),
                 total_amount=Sum('total', output_field=DecimalField(max_digits=10, decimal_places=2)),
                 total_paid=Sum('paid', output_field=DecimalField(max_digits=10, decimal_places=2)),
+                total_pending=Sum('pending', output_field=DecimalField(max_digits=10, decimal_places=2)),
                 total_outstanding=Sum('balance', output_field=DecimalField(max_digits=10, decimal_places=2)),
                 avg_days_to_pay=Avg(
                     F('payments__payment_date') - F('issue_date'),
@@ -169,6 +183,7 @@ class InvoiceViewSet(ModelViewSet):
             # Handle None values for sums
             stats['total_amount'] = float(stats['total_amount'] or 0)
             stats['total_paid'] = float(stats['total_paid'] or 0)
+            stats['total_pending'] = float(stats['total_pending'] or 0)
             stats['total_outstanding'] = float(stats['total_outstanding'] or 0)
             
             # Convert timedelta to days for avg_days_to_pay
@@ -246,10 +261,49 @@ class InvoiceViewSet(ModelViewSet):
         
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
     
+    @action(detail=True, methods=['post'])
+    def send_to_client(self, request, organization_pk=None, pk=None):
+        """
+        Send the invoice to the client and change its status to PENDING.
+        """
+        invoice = self.get_object()
+        
+        # Validate invoice state
+        if invoice.status != 'DRAFT':
+            return Response(
+                {"detail": f"Cannot send invoice in {invoice.status} status. Only DRAFT invoices can be sent."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Validate invoice has items
+        if not invoice.items.exists():
+            return Response(
+                {"detail": "Cannot send invoice without items."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            with transaction.atomic():
+                # Update invoice status
+                invoice.status = 'PENDING'
+                invoice.save()
+            
+                
+                serializer = self.get_serializer(invoice)
+                return Response({
+                    "detail": "Invoice has been sent to the client.",
+                    "invoice": serializer.data
+                })
+                
+        except Exception as e:
+            return Response(
+                {"detail": f"Failed to send invoice: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+    
 class PaymentViewSet(ModelViewSet):
     pagination_class = DefaultPagination
     permission_classes = [IsAuthenticated]
-    serializer_class = PaymentSerializer
     
     def get_queryset(self):
         return Payment.objects.select_related(
@@ -258,6 +312,13 @@ class PaymentViewSet(ModelViewSet):
         ).filter(
             client__organization_id=self.kwargs['organization_pk']
         ).order_by('-created_at')
+    
+    def get_serializer_class(self):
+        if self.action == 'create':
+            return CreatePaymentSerializer
+        elif self.action in ['update', 'partial_update']:
+            return UpdatePaymentSerializer
+        return PaymentSerializer
     
     def get_serializer_context(self):
         context = super().get_serializer_context()
@@ -307,32 +368,29 @@ class PaymentViewSet(ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        payment.status = 'COMPLETED'
-        payment.save()
-        
-        # Update invoice status based on total payments
-        invoice = payment.invoice
-        total_paid = Payment.objects.filter(
-            invoice=invoice,
-            status='COMPLETED'
-        ).aggregate(
-            total=Sum('amount', default=0)
-        )['total']
-        
-        if total_paid >= invoice.total_amount:
-            invoice.status = 'PAID'
-        elif total_paid > 0:
-            invoice.status = 'PARTIALLY_PAID'
-        
-        invoice.save()
-        
-        serializer = self.get_serializer(payment)
-        return Response(serializer.data)
+        try:
+            with transaction.atomic():
+                # Update payment status
+                payment.status = 'COMPLETED'
+                payment.save()
+                
+                # Update invoice status
+                invoice = payment.invoice
+                invoice.update_status_based_on_payments()
+                
+                serializer = self.get_serializer(payment)
+                return Response(serializer.data)
+                
+        except Exception as e:
+            return Response(
+                {"detail": f"Failed to complete payment: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
     
     @action(detail=True, methods=['post'])
     def fail(self, request, organization_pk=None, pk=None):
         """
-        Mark a payment as failed.
+        Mark a payment as failed and update the invoice status.
         """
         payment = self.get_object()
         
@@ -342,11 +400,24 @@ class PaymentViewSet(ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        payment.status = 'FAILED'
-        payment.save()
-        
-        serializer = self.get_serializer(payment)
-        return Response(serializer.data)
+        try:
+            with transaction.atomic():
+                # Update payment status
+                payment.status = 'FAILED'
+                payment.save()
+                
+                # Update invoice status
+                invoice = payment.invoice
+                invoice.update_status_based_on_payments()
+                
+                serializer = self.get_serializer(payment)
+                return Response(serializer.data)
+                
+        except Exception as e:
+            return Response(
+                {"detail": f"Failed to mark payment as failed: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
     
     @action(detail=True, methods=['post'])
     def refund(self, request, organization_pk=None, pk=None):
@@ -361,27 +432,43 @@ class PaymentViewSet(ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        payment.status = 'REFUNDED'
-        payment.save()
+        try:
+            with transaction.atomic():
+                payment.status = 'REFUNDED'
+                payment.save()
+                
+                # Update invoice status
+                invoice = payment.invoice
+                invoice.update_status_based_on_payments()
+                
+                serializer = self.get_serializer(payment)
+                return Response(serializer.data)
+                
+        except Exception as e:
+            return Response(
+                {"detail": f"Failed to process refund: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+    
+class InvoicePaymentViewSet(GenericViewSet, CreateModelMixin):
+    """
+    A simplified viewset for creating payments using only invoice ID.
+    This viewset only supports creating new payments.
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class = CreatePaymentSerializer
+    queryset = Payment.objects.all()
+    
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        payment = serializer.save()
         
-        # Update invoice status based on remaining payments
-        invoice = payment.invoice
-        remaining_paid = Payment.objects.filter(
-            invoice=invoice,
-            status='COMPLETED'
-        ).aggregate(
-            total=Sum('amount', default=0)
-        )['total']
-        
-        if remaining_paid == 0:
-            invoice.status = 'PENDING'
-        elif remaining_paid < invoice.total_amount:
-            invoice.status = 'PARTIALLY_PAID'
-        
-        invoice.save()
-        
-        serializer = self.get_serializer(payment)
-        return Response(serializer.data)
+        # Return the payment details
+        return Response(
+            PaymentSerializer(payment).data,
+            status=status.HTTP_201_CREATED
+        )
     
     
     

@@ -2,6 +2,7 @@ from django.db import models
 from django.core.validators import MinValueValidator
 from decimal import Decimal
 from organization.models import Organization
+from django.utils import timezone
 
 
 class Address(models.Model):
@@ -40,7 +41,11 @@ class Client(models.Model):
     class Meta:
         ordering = ['name', 'company_name']
 
+
+
+#TODO make the id a uuid field
 class Invoice(models.Model):
+    
     STATUS_CHOICES = [
         ('DRAFT', 'Draft'),
         ('PENDING', 'Pending'),
@@ -77,7 +82,17 @@ class Invoice(models.Model):
     
     @property
     def paid_amount(self):
-        return sum(payment.amount for payment in self.payments.all())
+        return sum(
+            payment.amount 
+            for payment in self.payments.filter(status='COMPLETED')
+        )
+    
+    @property
+    def pending_amount(self):
+        return sum(
+            payment.amount 
+            for payment in self.payments.filter(status='PENDING')
+        )
     
     @property
     def balance_due(self):
@@ -86,6 +101,28 @@ class Invoice(models.Model):
     @property
     def is_fully_paid(self):
         return self.balance_due <= Decimal('0.00')
+    
+
+    def update_status_based_on_payments(self):
+        """
+        Update invoice status based on payments
+        """
+        if self.status in ['DRAFT', 'CANCELLED']:
+            return
+        
+        total_paid = self.paid_amount
+        total_pending = self.pending_amount
+        
+        if total_paid >= self.total_amount:
+            self.status = 'PAID'
+        elif total_paid > 0 or total_pending > 0:
+            self.status = 'PARTIALLY_PAID'
+        elif self.due_date < timezone.now().date():
+            self.status = 'OVERDUE'
+        else:
+            self.status = 'PENDING'
+        
+        self.save()
 
 class InvoiceItem(models.Model):
     invoice = models.ForeignKey(Invoice, on_delete=models.CASCADE, related_name='items')
@@ -141,3 +178,16 @@ class Payment(models.Model):
 
     def __str__(self):
         return f"Payment {self.id} for Invoice {self.invoice.invoice_number}"
+    
+    @property
+    def pending_amount(self):
+        """
+        Returns the pending amount based on payment status.
+        If status is PENDING, returns the payment amount, otherwise returns 0.
+        """
+        return self.amount if self.status == 'PENDING' else Decimal('0.00')
+    
+    def save(self, *args, **kwargs):
+        super().save(*args, **kwargs)
+        # Update invoice status after payment status changes
+        self.invoice.update_status_based_on_payments()
