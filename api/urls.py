@@ -10,7 +10,9 @@ from human_resources.views import (
     EmployeeAttendanceStatsViewSet,
 )
 from finance.views import (
-    ClientModelViewset
+    ClientModelViewset,
+    InvoiceViewSet,
+    PaymentViewSet
 )
 
 
@@ -59,6 +61,12 @@ employee_attendance_stats_router.register(r'employee-attendance-stats', Employee
 client_router = routers.NestedDefaultRouter(router, r'organizations', lookup='organization')
 client_router.register('clients', ClientModelViewset, basename='client')
 
+invoice_router = routers.NestedDefaultRouter(router, r'organizations', lookup='organization')
+invoice_router.register('invoices', InvoiceViewSet, basename='invoice')
+
+payment_router = routers.NestedDefaultRouter(router, r'organizations', lookup='organization')
+payment_router.register('payments', PaymentViewSet, basename='payment')
+
 
 urlpatterns = [
      path(r'', include(router.urls)),
@@ -71,6 +79,8 @@ urlpatterns = [
      path(r'', include(employee_attendance_stats_router.urls)),
      path(r'', include(user_invitation_router.urls)),
      path(r'', include(client_router.urls)),
+     path(r'', include(invoice_router.urls)),
+     path(r'', include(payment_router.urls)),
      path(r'notify-customers/', notify_customers_view, name='notify-customers'),
      path(r'refine-attendance-records/', refine_attendance_records_view, name='refine-attendance-records'),
      path(r'generate-attendance-reports/', generate_attendance_reports_view, name='generate-attendance-reports'),

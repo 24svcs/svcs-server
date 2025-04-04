@@ -4,6 +4,7 @@ from django.utils import timezone
 from django.db import transaction
 from .models import Client, Invoice, InvoiceItem, Payment
 import uuid
+from decimal import DecimalException
 
 
 class ClientSerializer(serializers.ModelSerializer):
@@ -32,7 +33,7 @@ class ClientSerializer(serializers.ModelSerializer):
         return None
 
 
-
+# ================================ Client Serializers ================================
 class CreateClientSerializer(serializers.ModelSerializer):
     class Meta:
         model = Client
@@ -68,6 +69,7 @@ class CreateClientSerializer(serializers.ModelSerializer):
 
 
 
+# ================================ Invoice Item Serializers ================================
 class InvoiceItemSerializer(serializers.ModelSerializer):
     total_amount = serializers.SerializerMethodField()
     
@@ -89,7 +91,7 @@ class InvoiceItemSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Unit price cannot be negative")
         return value
 
-
+# ================================ Invoice Item Serializers ================================
 class SimpleInvoiceItemSerializer(serializers.ModelSerializer):
     total_amount = serializers.SerializerMethodField()
     
@@ -102,6 +104,7 @@ class SimpleInvoiceItemSerializer(serializers.ModelSerializer):
         return obj.total_amount
 
 
+# ================================ Payment Serializers ================================
 class PaymentSerializer(serializers.ModelSerializer):
     class Meta:
         model = Payment
@@ -110,7 +113,7 @@ class PaymentSerializer(serializers.ModelSerializer):
             'payment_method', 'status', 'transaction_id', 'notes',
             'created_at'
         ]
-        read_only_fields = ['created_at']
+        read_only_fields = ['created_at', 'status']
     
     def validate_amount(self, value):
         if value <= Decimal('0'):
@@ -121,11 +124,64 @@ class PaymentSerializer(serializers.ModelSerializer):
         if value > timezone.now().date():
             raise serializers.ValidationError("Payment date cannot be in the future")
         return value
+    
+    def validate(self, data):
+        invoice = data.get('invoice')
+        if not invoice:
+            raise serializers.ValidationError({
+                "invoice": "Invoice is required"
+            })
+        
+        # Check if invoice is in a valid state for payment
+        valid_states = ['PENDING', 'OVERDUE', 'PARTIALLY_PAID']
+        if invoice.status not in valid_states:
+            raise serializers.ValidationError({
+                "invoice": f"Cannot add payment to invoice in {invoice.status} status. Invoice must be in one of these states: {', '.join(valid_states)}"
+            })
+        
+        # Validate payment amount doesn't exceed remaining balance
+        remaining_balance = invoice.balance_due
+        if data.get('amount') > remaining_balance:
+            raise serializers.ValidationError({
+                "amount": f"Payment amount ({data.get('amount')}) cannot exceed remaining balance ({remaining_balance})"
+            })
+        
+        return data
+    
+    @transaction.atomic
+    def create(self, validated_data):
+        # Set initial payment status
+        validated_data['status'] = 'PENDING'
+        payment = super().create(validated_data)
+        
+        # Update invoice status based on payment
+        self._update_invoice_status(payment)
+        
+        return payment
+    
+    def _update_invoice_status(self, payment):
+        invoice = payment.invoice
+        
+        # Calculate total payments including the new one
+        total_payments = sum(
+            payment.amount for payment in Payment.objects.filter(
+                invoice=invoice,
+                status='COMPLETED'
+            )
+        ) + payment.amount
+        
+        # Update invoice status based on payment amount
+        if total_payments >= invoice.total_amount:
+            invoice.status = 'PAID'
+        elif total_payments > 0:
+            invoice.status = 'PARTIALLY_PAID'  # Changed from PENDING to PARTIALLY_PAID
+        
+        invoice.save()
 
 
+# ================================ Invoice Serializers ================================
 class InvoiceSerializer(serializers.ModelSerializer):
     items = SimpleInvoiceItemSerializer(many=True, read_only=True)
-    payments = PaymentSerializer(many=True, read_only=True)
     subtotal_amount = serializers.SerializerMethodField()
     tax_amount = serializers.SerializerMethodField()
     total_amount = serializers.SerializerMethodField()
@@ -133,21 +189,24 @@ class InvoiceSerializer(serializers.ModelSerializer):
     balance_due = serializers.SerializerMethodField()
     is_fully_paid = serializers.SerializerMethodField()
     days_overdue = serializers.SerializerMethodField()
-    
+    client_name = serializers.SerializerMethodField()
     class Meta:
         model = Invoice
         fields = [
-            'id', 'invoice_number', 'client', 'issue_date', 'due_date',
-            'status', 'tax_rate', 'notes', 'items', 'payments',
+            'id', 'invoice_number', 'client_name', 'issue_date', 'due_date',
+            'status', 'tax_rate', 'notes',
             'subtotal_amount', 'tax_amount', 'total_amount',
             'paid_amount', 'balance_due', 'is_fully_paid',
-            'days_overdue', 'created_at', 'updated_at'
+            'days_overdue', 'created_at', 'updated_at','items', 
         ]
         read_only_fields = [
             'invoice_number', 'created_at', 'updated_at',
             'subtotal_amount', 'tax_amount', 'total_amount',
             'paid_amount', 'balance_due', 'is_fully_paid'
         ]
+        
+    def get_client_name(self, obj):
+        return obj.client.name
     
     def get_subtotal_amount(self, obj):
         return obj.subtotal_amount
@@ -182,34 +241,78 @@ class InvoiceSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Cannot change status of a paid invoice")
         return value
 
+# ================================ Invoice Item Serializers ================================
+class CreateInvoiceItemSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = InvoiceItem
+        fields = ['product', 'description', 'quantity', 'unit_price']
+        
+    def validate_quantity(self, value):
+        try:
+            value = Decimal(str(value))
+            if value <= Decimal('0'):
+                raise serializers.ValidationError("Quantity must be greater than 0")
+            return value
+        except (TypeError, ValueError, DecimalException):
+            raise serializers.ValidationError("Invalid decimal value")
+    
+    def validate_unit_price(self, value):
+        try:
+            value = Decimal(str(value))
+            if value < Decimal('0'):
+                raise serializers.ValidationError("Unit price cannot be negative")
+            return value
+        except (TypeError, ValueError, DecimalException):
+            raise serializers.ValidationError("Invalid decimal value")
 
+# ================================ Invoice Serializers ================================
 class CreateInvoiceSerializer(serializers.ModelSerializer):
-    items = InvoiceItemSerializer(many=True)
+    items = CreateInvoiceItemSerializer(many=True)
+    client_id = serializers.IntegerField()
     
     class Meta:
         model = Invoice
         fields = [
-            'client', 'issue_date', 'due_date', 'tax_rate',
+            'client_id', 'issue_date', 'due_date', 'tax_rate',
             'notes', 'items'
         ]
     
+    def validate_client(self, value):
+        try:
+            organization_id = self.context.get('organization_id')
+            client = Client.objects.filter(
+                id=value,
+                organization_id=organization_id,
+                is_active=True
+            ).first()
+            
+            if not client:
+                raise serializers.ValidationError("Invalid or inactive client ID")
+                
+            return value
+        except (TypeError, ValueError):
+            raise serializers.ValidationError("Client ID must be a valid integer")
+    
+    def validate_tax_rate(self, value):
+        try:
+            value = Decimal(str(value))
+            if value < Decimal('0') or value > Decimal('100'):
+                raise serializers.ValidationError("Tax rate must be between 0 and 100")
+            return value
+        except (TypeError, ValueError, DecimalException):
+            raise serializers.ValidationError("Invalid decimal value")
+    
     def validate(self, data):
         # Check if issue date is not in the future
-        if data['issue_date'] > timezone.now().date():
+        if data.get('issue_date') and data['issue_date'] > timezone.now().date():
             raise serializers.ValidationError({
                 "issue_date": "Issue date cannot be in the future"
             })
         
         # Check if due date is not before issue date
-        if data['due_date'] < data['issue_date']:
+        if data.get('issue_date') and data.get('due_date') and data['due_date'] < data['issue_date']:
             raise serializers.ValidationError({
                 "due_date": "Due date cannot be before issue date"
-            })
-        
-        # Validate tax rate is within reasonable bounds
-        if data['tax_rate'] < 0 or data['tax_rate'] > 100:
-            raise serializers.ValidationError({
-                "tax_rate": "Tax rate must be between 0 and 100"
             })
         
         # Ensure there's at least one item
@@ -217,24 +320,19 @@ class CreateInvoiceSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({
                 "items": "Invoice must have at least one item"
             })
-            
-        # Validate client exists and is active
-        client = Client.objects.filter(id=data['client'], is_active=True).first()
-        if not client:
-            raise serializers.ValidationError({
-                "client": "Invalid or inactive client"
-            })
         
-        # Optional: Check if client has any overdue invoices
-        overdue_invoices = Invoice.objects.filter(
-            client=client,
-            status='OVERDUE',
-            due_date__lt=timezone.now().date()
-        )
-        if overdue_invoices.exists():
-            raise serializers.ValidationError({
-                "client": "Client has overdue invoices that need to be settled first"
-            })
+        # Check for overdue invoices
+        client_id = data.get('client')
+        if client_id:
+            overdue_invoices = Invoice.objects.filter(
+                client_id=client_id,
+                status='OVERDUE',
+                due_date__lt=timezone.now().date()
+            )
+            if overdue_invoices.exists():
+                raise serializers.ValidationError({
+                    "client": "Client has overdue invoices that need to be settled first"
+                })
         
         return data
     
@@ -254,13 +352,16 @@ class CreateInvoiceSerializer(serializers.ModelSerializer):
     @transaction.atomic
     def create(self, validated_data):
         items_data = validated_data.pop('items')
+        organization_id = self.context['organization_id']
         
         # Generate unique invoice number
         invoice_number = self.generate_invoice_number()
         
-        # Create invoice with generated number
+        # Create invoice with generated number and organization
         invoice = Invoice.objects.create(
             invoice_number=invoice_number,
+            organization_id=organization_id,
+            status='DRAFT',  # Always start as DRAFT
             **validated_data
         )
         
@@ -268,41 +369,104 @@ class CreateInvoiceSerializer(serializers.ModelSerializer):
         for item_data in items_data:
             InvoiceItem.objects.create(invoice=invoice, **item_data)
         
-        # Optional: Send notification to client
-        self.send_invoice_notification(invoice)
-        
         return invoice
     
-    def send_invoice_notification(self, invoice):
-        # This is a placeholder for sending notifications
-        # You would implement this based on your notification system
-        pass
+    @transaction.atomic
+    def create_bulk(self, validated_data_list):
+        """
+        Create multiple invoices in a single transaction
+        """
+        invoices = []
+        organization_id = self.context['organization_id']
+        
+        for validated_data in validated_data_list:
+            items_data = validated_data.pop('items')
+            invoice_number = self.generate_invoice_number()
+            
+            # Create invoice
+            invoice = Invoice.objects.create(
+                invoice_number=invoice_number,
+                organization_id=organization_id,
+                status='DRAFT',
+                **validated_data
+            )
+            
+            # Create items for this invoice
+            for item_data in items_data:
+                InvoiceItem.objects.create(invoice=invoice, **item_data)
+            
+            invoices.append(invoice)
+        
+        return invoices
 
 
+# ================================ Invoice Serializers ================================     
 class UpdateInvoiceSerializer(serializers.ModelSerializer):
     items = InvoiceItemSerializer(many=True, required=False)
     
     class Meta:
         model = Invoice
         fields = [
-            'status', 'tax_rate', 'notes', 'items'
+            'tax_rate', 'notes', 'items'  # Removed status from editable fields
         ]
     
     def validate(self, data):
-        if self.instance.status == 'PAID':
-            raise serializers.ValidationError("Cannot modify a paid invoice")
+        # Check if invoice is in an editable state
+        editable_states = ['DRAFT', 'PENDING']
+        if self.instance.status not in editable_states:
+            raise serializers.ValidationError({
+                "non_field_errors": f"Cannot modify invoice in {self.instance.status} status. Only invoices in these states can be modified: {', '.join(editable_states)}"
+            })
+        
+        # Validate tax rate changes
+        if 'tax_rate' in data:
+            try:
+                tax_rate = Decimal(str(data['tax_rate']))
+                if tax_rate < Decimal('0') or tax_rate > Decimal('100'):
+                    raise serializers.ValidationError({
+                        "tax_rate": "Tax rate must be between 0 and 100"
+                    })
+            except (TypeError, ValueError, DecimalException):
+                raise serializers.ValidationError({
+                    "tax_rate": "Invalid decimal value for tax rate"
+                })
+        
+        # Validate items if provided
+        if 'items' in data:
+            if not data['items']:
+                raise serializers.ValidationError({
+                    "items": "Invoice must have at least one item"
+                })
+            
+            # Validate each item's quantity and unit price
+            for item in data['items']:
+                if 'quantity' in item and item['quantity'] <= 0:
+                    raise serializers.ValidationError({
+                        "items": "Item quantity must be greater than 0"
+                    })
+                if 'unit_price' in item and item['unit_price'] < 0:
+                    raise serializers.ValidationError({
+                        "items": "Item unit price cannot be negative"
+                    })
+        
         return data
     
     def update(self, instance, validated_data):
         items_data = validated_data.pop('items', None)
         
         if items_data is not None:
-            # Delete existing items
-            instance.items.all().delete()
-            # Create new items
-            for item_data in items_data:
-                InvoiceItem.objects.create(invoice=instance, **item_data)
+            # Delete existing items only if invoice is in DRAFT or PENDING status
+            if instance.status in ['DRAFT', 'PENDING']:
+                instance.items.all().delete()
+                # Create new items
+                for item_data in items_data:
+                    InvoiceItem.objects.create(invoice=instance, **item_data)
+            else:
+                raise serializers.ValidationError({
+                    "items": "Cannot modify items for invoices not in DRAFT or PENDING status"
+                })
         
+        # Update invoice fields
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
         

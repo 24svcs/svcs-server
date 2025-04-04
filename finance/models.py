@@ -47,6 +47,7 @@ class Invoice(models.Model):
         ('PAID', 'Paid'),
         ('OVERDUE', 'Overdue'),
         ('CANCELLED', 'Cancelled'),
+        ('PARTIALLY_PAID', 'Partially Paid'),
     ]
     organization = models.ForeignKey(Organization, models.CASCADE, related_name='clients')
     client = models.ForeignKey(Client, on_delete=models.CASCADE, related_name='invoices')
