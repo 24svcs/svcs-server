@@ -10,7 +10,7 @@ from api.pagination import DefaultPagination
 from django_filters.rest_framework import DjangoFilterBackend
 from .filters import ClientFilter, InvoiceFilter
 from django.db import models, transaction
-from django.db.models import F, Q, Sum, Avg, Count, DecimalField, Value
+from django.db.models import F, Q, Sum, Avg, Count, DecimalField, Value, ExpressionWrapper
 from django.db.models.functions import Coalesce
 from rest_framework.response import Response
 from django.utils import timezone
@@ -19,6 +19,7 @@ from rest_framework.decorators import action
 from rest_framework import status
 from rest_framework import  filters
 from decimal import Decimal     
+from finance.models import InvoiceItem
 
 class ClientModelViewset(ModelViewSet):
     pagination_class = DefaultPagination
@@ -75,22 +76,28 @@ class ClientModelViewset(ModelViewSet):
         serializer = self.get_serializer(queryset, many=True)
         return Response(serializer.data)
     
+
+# ================================ Invoice Viewset ================================
+
 class InvoiceViewSet(ModelViewSet):
     pagination_class = DefaultPagination
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
-    search_fields = ['invoice_number__istartswith', 'client__name__istartswith', 'client__email__istartswith', 'client__phone__exact', 'client__company_name__istartswith', 'client__tax_number__istartswith']
+    search_fields = [
+        'invoice_number__istartswith',
+        'client__name__istartswith',
+        'client__phone__exact',
+        'client__company_name__istartswith',
+    ]
     permission_classes = [IsAuthenticated]
     filterset_class = InvoiceFilter
     
     def get_queryset(self):
-        return Invoice.objects.select_related(
-            'client'
-        ).prefetch_related(
+        return Invoice.objects.select_related('client').prefetch_related(
             'items',
             'payments'
-        ).filter(
-            client__organization_id=self.kwargs['organization_pk']
-        )
+        ).filter(organization_id=self.kwargs['organization_pk'])
+  
+
     
     def get_serializer_class(self):
         if self.action == 'create':
@@ -104,121 +111,7 @@ class InvoiceViewSet(ModelViewSet):
         context['organization_id'] = self.kwargs['organization_pk']
         return context
     
-    def list(self, request, *args, **kwargs):
-        queryset = self.filter_queryset(self.get_queryset())
-        page = self.paginate_queryset(queryset)
-        
-        if page is not None:
-            serializer = self.get_serializer(page, many=True)
-            response = self.get_paginated_response(serializer.data)
-            
-            # Calculate date ranges for statistics
-            current_date = timezone.now()
-            thirty_days_ago = current_date - timedelta(days=30)
-            ninety_days_ago = current_date - timedelta(days=90)
-            
-            # Get base queryset for statistics with annotations
-            base_qs = Invoice.objects.filter(
-                client__organization_id=self.kwargs['organization_pk']
-            ).annotate(
-                subtotal=Sum(
-                    F('items__quantity') * F('items__unit_price'),
-                    output_field=DecimalField(max_digits=10, decimal_places=2)
-                ),
-                tax=F('subtotal') * F('tax_rate') / Value(100, output_field=DecimalField(max_digits=10, decimal_places=2)),
-                total=F('subtotal') + F('tax'),
-                paid=Coalesce(
-                    Sum(
-                        'payments__amount',
-                        filter=Q(payments__status='COMPLETED'),
-                        output_field=DecimalField(max_digits=10, decimal_places=2)
-                    ),
-                    Value(0, output_field=DecimalField(max_digits=10, decimal_places=2))
-                ),
-                pending=Coalesce(
-                    Sum(
-                        'payments__amount',
-                        filter=Q(payments__status='PENDING'),
-                        output_field=DecimalField(max_digits=10, decimal_places=2)
-                    ),
-                    Value(0, output_field=DecimalField(max_digits=10, decimal_places=2))
-                )
-            ).annotate(
-                balance=F('total') - F('paid')
-            )
-            
-            # Calculate statistics
-            stats = base_qs.aggregate(
-                total_invoices=Count('id'),
-                unpaid_invoices=Count(
-                    'id',
-                    filter=Q(status__in=['UNPAID', 'OVERDUE'])
-                ),
-                overdue_invoices=Count(
-                    'id',
-                    filter=Q(status='OVERDUE')
-                ),
-                paid_invoices=Count(
-                    'id',
-                    filter=Q(status='PAID')
-                ),
-                invoices_last_30d=Count(
-                    'id',
-                    filter=Q(issue_date__gte=thirty_days_ago)
-                ),
-                invoices_last_90d=Count(
-                    'id',
-                    filter=Q(issue_date__gte=ninety_days_ago)
-                ),
-                total_amount=Sum('total', output_field=DecimalField(max_digits=10, decimal_places=2)),
-                total_paid=Sum('paid', output_field=DecimalField(max_digits=10, decimal_places=2)),
-                total_pending=Sum('pending', output_field=DecimalField(max_digits=10, decimal_places=2)),
-                total_outstanding=Sum('balance', output_field=DecimalField(max_digits=10, decimal_places=2)),
-                avg_days_to_pay=Avg(
-                    F('payments__payment_date') - F('issue_date'),
-                    filter=Q(status='PAID')
-                )
-            )
-            
-            # Handle None values for sums
-            stats['total_amount'] = float(stats['total_amount'] or 0)
-            stats['total_paid'] = float(stats['total_paid'] or 0)
-            stats['total_pending'] = float(stats['total_pending'] or 0)
-            stats['total_outstanding'] = float(stats['total_outstanding'] or 0)
-            
-            # Convert timedelta to days for avg_days_to_pay
-            if stats['avg_days_to_pay']:
-                stats['avg_days_to_pay'] = stats['avg_days_to_pay'].days
-            else:
-                stats['avg_days_to_pay'] = 0
-            
-            response.data['statistics'] = stats
-            return response
-        
-        serializer = self.get_serializer(queryset, many=True)
-        return Response(serializer.data)
     
-    @action(detail=True, methods=['post'])
-    def mark_as_paid(self, request, organization_pk=None, pk=None):
-        invoice = self.get_object()
-        
-        if invoice.status == 'PAID':
-            return Response(
-                {"detail": "Invoice is already marked as paid."},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        if invoice.balance_due > 0:
-            return Response(
-                {"detail": "Cannot mark as paid. Invoice has outstanding balance."},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        invoice.status = 'PAID'
-        invoice.save()
-        
-        serializer = self.get_serializer(invoice)
-        return Response(serializer.data)
     
     @action(detail=True, methods=['post'])
     def send_reminder(self, request, organization_pk=None, pk=None):
@@ -237,30 +130,7 @@ class InvoiceViewSet(ModelViewSet):
             status=status.HTTP_200_OK
         )
     
-    @action(detail=False, methods=['post'])
-    def bulk_create(self, request, organization_pk=None):
-        """
-        Create multiple invoices at once.
-        """
-        serializer = CreateInvoiceSerializer(
-            data=request.data,
-            many=True,
-            context={'organization_id': organization_pk}
-        )
-        
-        if serializer.is_valid():
-            try:
-                invoices = serializer.create_bulk(serializer.validated_data)
-                response_serializer = InvoiceSerializer(invoices, many=True)
-                return Response(response_serializer.data, status=status.HTTP_201_CREATED)
-            except Exception as e:
-                return Response(
-                    {"error": str(e)},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-        
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-    
+
     @action(detail=True, methods=['post'])
     def send_to_client(self, request, organization_pk=None, pk=None):
         """
@@ -300,6 +170,11 @@ class InvoiceViewSet(ModelViewSet):
                 {"detail": f"Failed to send invoice: {str(e)}"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+            
+            
+            
+            
+# ================================ Payment Viewset ================================
     
 class PaymentViewSet(ModelViewSet):
     pagination_class = DefaultPagination

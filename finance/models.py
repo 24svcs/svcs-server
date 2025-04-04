@@ -3,8 +3,6 @@ from django.core.validators import MinValueValidator
 from decimal import Decimal
 from organization.models import Organization
 from django.utils import timezone
-
-
 class Address(models.Model):
     street = models.CharField(max_length=255)
     city = models.CharField(max_length=100)
@@ -32,7 +30,7 @@ class Client(models.Model):
     
     @property
     def total_paid(self):
-        return sum(payment.amount for payment in self.payments.all())
+        return sum(payment.amount for payment in self.payments.filter(status='COMPLETED'))
     
     @property
     def total_outstanding(self):
@@ -67,62 +65,56 @@ class Invoice(models.Model):
 
     def __str__(self):
         return f"Invoice {self.invoice_number} - {self.client.name}"
-
-    @property
-    def subtotal_amount(self):
-        return sum(item.total_amount for item in self.items.all())
-
+    
     @property
     def tax_amount(self):
-        return self.subtotal_amount * (self.tax_rate / Decimal('100'))
-
+        return sum(item.amount for item in self.items.all()) * self.tax_rate / 100
+    
     @property
     def total_amount(self):
-        return self.subtotal_amount + self.tax_amount
+        return sum(item.amount for item in self.items.all()) + self.tax_amount
     
     @property
     def paid_amount(self):
-        return sum(
-            payment.amount 
-            for payment in self.payments.filter(status='COMPLETED')
-        )
+        return sum(payment.amount for payment in self.payments.filter(status='COMPLETED'))
     
     @property
-    def pending_amount(self):
-        return sum(
-            payment.amount 
-            for payment in self.payments.filter(status='PENDING')
-        )
-    
-    @property
-    def balance_due(self):
+    def due_balance(self):
         return self.total_amount - self.paid_amount
     
     @property
-    def is_fully_paid(self):
-        return self.balance_due <= Decimal('0.00')
+    def overdue_days(self):
+        if self.status == 'OVERDUE':
+            return (timezone.now().date() - self.due_date).days
+        return 0
     
-
+    @property
+    def pending_payments(self):
+        return sum(payment.amount for payment in self.payments.filter(status='PENDING'))
+    
+    
+            
     def update_status_based_on_payments(self):
-        """
-        Update invoice status based on payments
-        """
+        # Don't change status for DRAFT or CANCELLED invoices
         if self.status in ['DRAFT', 'CANCELLED']:
             return
-        
+            
+        # Calculate totals
+        total_amount = self.total_amount
         total_paid = self.paid_amount
-        total_pending = self.pending_amount
-        
-        if total_paid >= self.total_amount:
+
+        if total_paid >= total_amount:
             self.status = 'PAID'
-        elif total_paid > 0 or total_pending > 0:
+        elif total_paid > 0:
             self.status = 'PARTIALLY_PAID'
         elif self.due_date < timezone.now().date():
             self.status = 'OVERDUE'
         else:
             self.status = 'PENDING'
-        
-        self.save()
+            
+        self.save(update_fields=['status'])
+    
+    
 
 class InvoiceItem(models.Model):
     invoice = models.ForeignKey(Invoice, on_delete=models.CASCADE, related_name='items')
@@ -141,9 +133,9 @@ class InvoiceItem(models.Model):
 
     def __str__(self):
         return f"{self.product} - {self.invoice.invoice_number}"
-
+    
     @property
-    def total_amount(self):
+    def amount(self):
         return self.quantity * self.unit_price
 
 class Payment(models.Model):
@@ -179,15 +171,7 @@ class Payment(models.Model):
     def __str__(self):
         return f"Payment {self.id} for Invoice {self.invoice.invoice_number}"
     
-    @property
-    def pending_amount(self):
-        """
-        Returns the pending amount based on payment status.
-        If status is PENDING, returns the payment amount, otherwise returns 0.
-        """
-        return self.amount if self.status == 'PENDING' else Decimal('0.00')
     
     def save(self, *args, **kwargs):
         super().save(*args, **kwargs)
-        # Update invoice status after payment status changes
         self.invoice.update_status_based_on_payments()

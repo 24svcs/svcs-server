@@ -5,6 +5,8 @@ from django.db import transaction
 from .models import Client, Invoice, InvoiceItem, Payment
 import uuid
 from decimal import DecimalException
+from django.db.models import ExpressionWrapper, Sum, F, Value, Q, DecimalField
+from django.db.models.functions import Coalesce
 
 
 class ClientSerializer(serializers.ModelSerializer):
@@ -79,7 +81,7 @@ class InvoiceItemSerializer(serializers.ModelSerializer):
         read_only_fields = ['total_amount']
     
     def get_total_amount(self, obj):
-        return obj.total_amount
+        return obj.amount
     
     def validate_quantity(self, value):
         if value <= Decimal('0'):
@@ -93,34 +95,27 @@ class InvoiceItemSerializer(serializers.ModelSerializer):
 
 # ================================ Invoice Item Serializers ================================
 class SimpleInvoiceItemSerializer(serializers.ModelSerializer):
-    total_amount = serializers.SerializerMethodField()
-    
     class Meta:
         model = InvoiceItem
-        fields = ['id', 'product', 'unit_price', 'quantity', 'total_amount']
-        read_only_fields = ['total_amount']
+        fields = ['id', 'product', 'unit_price', 'quantity']
     
-    def get_total_amount(self, obj):
-        return obj.total_amount
 
 
 # ================================ Payment Serializers ================================
 class PaymentSerializer(serializers.ModelSerializer):
     invoice_number = serializers.CharField(source='invoice.invoice_number', read_only=True)
     client_name = serializers.CharField(source='client.name', read_only=True)
-    pending_amount = serializers.SerializerMethodField()
+
     
     class Meta:
         model = Payment
         fields = [
             'id', 'invoice_number', 'client_name', 'amount', 'payment_date',
             'payment_method', 'status', 'transaction_id', 'notes',
-            'created_at', 'pending_amount'
+            'created_at', 
         ]
         read_only_fields = ['created_at', 'status']
     
-    def get_pending_amount(self, obj):
-        return obj.pending_amount  # This now uses the property from the model
 
 
 class CreatePaymentSerializer(serializers.ModelSerializer):
@@ -132,7 +127,30 @@ class CreatePaymentSerializer(serializers.ModelSerializer):
     
     def validate_invoice_id(self, value):
         try:
-            invoice = Invoice.objects.select_related('client').get(id=value)
+            invoice = Invoice.objects.annotate(
+                calculated_total=ExpressionWrapper(
+                    Coalesce(
+                        Sum(
+                            F('items__quantity') * F('items__unit_price'),
+                            output_field=DecimalField(max_digits=10, decimal_places=2)
+                        ),
+                        Value(0, output_field=DecimalField(max_digits=10, decimal_places=2))
+                    ) * (1 + F('tax_rate') / 100),
+                    output_field=DecimalField(max_digits=10, decimal_places=2)
+                ),
+                completed_payments_sum=Coalesce(
+                    Sum(
+                        'payments__amount',
+                        filter=Q(payments__status='COMPLETED'),
+                        output_field=DecimalField(max_digits=10, decimal_places=2)
+                    ),
+                    Value(0, output_field=DecimalField(max_digits=10, decimal_places=2))
+                ),
+                calculated_balance=ExpressionWrapper(
+                    F('calculated_total') - F('completed_payments_sum'),
+                    output_field=DecimalField(max_digits=10, decimal_places=2)
+                )
+            ).select_related('client').get(id=value)
             
             # Check if invoice can accept payments
             if invoice.status not in ['PENDING', 'OVERDUE', 'PARTIALLY_PAID']:
@@ -152,12 +170,35 @@ class CreatePaymentSerializer(serializers.ModelSerializer):
     
     def validate(self, data):
         # Get invoice and validate payment amount
-        invoice = Invoice.objects.get(id=data['invoice_id'])
+        invoice = Invoice.objects.annotate(
+            calculated_total=ExpressionWrapper(
+                Coalesce(
+                    Sum(
+                        F('items__quantity') * F('items__unit_price'),
+                        output_field=DecimalField(max_digits=10, decimal_places=2)
+                    ),
+                    Value(0, output_field=DecimalField(max_digits=10, decimal_places=2))
+                ) * (1 + F('tax_rate') / 100),
+                output_field=DecimalField(max_digits=10, decimal_places=2)
+            ),
+            completed_payments_sum=Coalesce(
+                Sum(
+                    'payments__amount',
+                    filter=Q(payments__status='COMPLETED'),
+                    output_field=DecimalField(max_digits=10, decimal_places=2)
+                ),
+                Value(0, output_field=DecimalField(max_digits=10, decimal_places=2))
+            ),
+            calculated_balance=ExpressionWrapper(
+                F('calculated_total') - F('completed_payments_sum'),
+                output_field=DecimalField(max_digits=10, decimal_places=2)
+            )
+        ).get(id=data['invoice_id'])
         
         # Check if payment amount exceeds remaining balance
-        if data['amount'] > invoice.balance_due:
+        if data['amount'] > invoice.calculated_balance:
             raise serializers.ValidationError({
-                "amount": f"Payment amount ({data['amount']}) cannot exceed remaining balance ({invoice.balance_due})"
+                "amount": f"Payment amount ({data['amount']}) cannot exceed remaining balance ({invoice.calculated_balance})"
             })
         
         return data
@@ -185,71 +226,57 @@ class CreatePaymentSerializer(serializers.ModelSerializer):
 
 
 # ================================ Invoice Serializers ================================
+
 class InvoiceSerializer(serializers.ModelSerializer):
     items = SimpleInvoiceItemSerializer(many=True, read_only=True)
-    subtotal_amount = serializers.SerializerMethodField()
-    tax_amount = serializers.SerializerMethodField()
-    total_amount = serializers.SerializerMethodField()
-    paid_amount = serializers.SerializerMethodField()
-    pending_amount = serializers.SerializerMethodField()
-    balance_due = serializers.SerializerMethodField()
-    is_fully_paid = serializers.SerializerMethodField()
+    client = serializers.SerializerMethodField()
     days_overdue = serializers.SerializerMethodField()
-    client_name = serializers.SerializerMethodField()
+    total_amount = serializers.SerializerMethodField()
+    tax_amount = serializers.SerializerMethodField()
+    paid_amount = serializers.SerializerMethodField()
+    due_balance = serializers.SerializerMethodField()
+    overdue_days = serializers.SerializerMethodField()
+    
+    
+    pending_payments = serializers.SerializerMethodField()
     
     class Meta:
         model = Invoice
         fields = [
-            'id', 'invoice_number', 'client_name', 'issue_date', 'due_date',
-            'status', 'tax_rate', 'notes',
-            'subtotal_amount', 'tax_amount', 'total_amount',
-            'paid_amount', 'pending_amount', 'balance_due', 'is_fully_paid',
-            'days_overdue', 'created_at', 'updated_at','items', 
+            'id','client', 'invoice_number', 'issue_date',
+            'due_date', 'status', 'tax_rate', 'notes', 'days_overdue',
+            'total_amount', 'tax_amount', 'paid_amount',
+            'due_balance', 'overdue_days', 'pending_payments',
+            'created_at', 'updated_at', 'items'
         ]
-        read_only_fields = [
-            'invoice_number', 'created_at', 'updated_at',
-            'subtotal_amount', 'tax_amount', 'total_amount',
-            'paid_amount', 'pending_amount', 'balance_due', 'is_fully_paid'
-        ]
-    
-    def get_client_name(self, obj):
+        
+        
+    def get_client(self, obj):
         return obj.client.name
-    
-    def get_subtotal_amount(self, obj):
-        return obj.subtotal_amount
-    
-    def get_tax_amount(self, obj):
-        return obj.tax_amount
-    
-    def get_total_amount(self, obj):
-        return obj.total_amount
-    
-    def get_paid_amount(self, obj):
-        return obj.paid_amount
-    
-    def get_pending_amount(self, obj):
-        return obj.pending_amount
-    
-    def get_balance_due(self, obj):
-        return obj.balance_due
-    
-    def get_is_fully_paid(self, obj):
-        return obj.is_fully_paid
     
     def get_days_overdue(self, obj):
         if obj.status == 'OVERDUE':
             return (timezone.now().date() - obj.due_date).days
         return 0
     
-    def validate_due_date(self, value):
-        if value < self.initial_data.get('issue_date'):
-            raise serializers.ValidationError("Due date cannot be before issue date")
-        return value
+    def get_total_amount(self, obj):
+        return obj.total_amount
     
-    def validate_status(self, value):
-        if self.instance and self.instance.status == 'PAID' and value != 'PAID':
-            raise serializers.ValidationError("Cannot change status of a paid invoice")
-        return value
+    def get_tax_amount(self, obj):
+        return obj.tax_amount
+    
+    def get_paid_amount(self, obj):
+        return obj.paid_amount
+    
+    def get_due_balance(self, obj):
+        return obj.due_balance
+    
+    def get_overdue_days(self, obj):
+        return obj.overdue_days
+    
+    def get_pending_payments(self, obj):
+        return obj.pending_payments
+    
 
 # ================================ Invoice Item Serializers ================================
 class CreateInvoiceItemSerializer(serializers.ModelSerializer):
@@ -367,34 +394,7 @@ class CreateInvoiceSerializer(serializers.ModelSerializer):
             InvoiceItem.objects.create(invoice=invoice, **item_data)
         
         return invoice
-    
-    @transaction.atomic
-    def create_bulk(self, validated_data_list):
-        """
-        Create multiple invoices in a single transaction
-        """
-        invoices = []
-        organization_id = self.context['organization_id']
-        
-        for validated_data in validated_data_list:
-            items_data = validated_data.pop('items')
-            invoice_number = self.generate_invoice_number()
-            
-            # Create invoice
-            invoice = Invoice.objects.create(
-                invoice_number=invoice_number,
-                organization_id=organization_id,
-                status='DRAFT',
-                **validated_data
-            )
-            
-            # Create items for this invoice
-            for item_data in items_data:
-                InvoiceItem.objects.create(invoice=invoice, **item_data)
-            
-            invoices.append(invoice)
-        
-        return invoices
+
 
 
 # ================================ Invoice Serializers ================================     
@@ -404,7 +404,7 @@ class UpdateInvoiceSerializer(serializers.ModelSerializer):
     class Meta:
         model = Invoice
         fields = [
-            'tax_rate', 'notes', 'items'  # Removed status from editable fields
+            'tax_rate', 'notes', 'items'
         ]
     
     def validate(self, data):
