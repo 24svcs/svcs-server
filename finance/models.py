@@ -3,6 +3,9 @@ from django.core.validators import MinValueValidator
 from decimal import Decimal
 from organization.models import Organization
 from django.utils import timezone
+
+
+
 class Address(models.Model):
     street = models.CharField(max_length=255)
     city = models.CharField(max_length=100)
@@ -30,11 +33,21 @@ class Client(models.Model):
     
     @property
     def total_paid(self):
+        # Use prefetched payments if available
+        if hasattr(self, '_prefetched_objects_cache') and 'payments' in self._prefetched_objects_cache:
+            return sum(payment.amount for payment in self._prefetched_objects_cache['payments'] 
+                      if payment.status == 'COMPLETED')
         return sum(payment.amount for payment in self.payments.filter(status='COMPLETED'))
     
     @property
     def total_outstanding(self):
-        return sum(invoice.total_amount for invoice in self.invoices.all()) - self.total_paid
+        # Use prefetched invoices if available
+        if hasattr(self, '_prefetched_objects_cache') and 'invoices' in self._prefetched_objects_cache:
+            total_invoice_amount = sum(invoice.total_amount for invoice in self._prefetched_objects_cache['invoices'])
+        else:
+            total_invoice_amount = sum(invoice.total_amount for invoice in self.invoices.all())
+        
+        return total_invoice_amount - self.total_paid
     
     class Meta:
         ordering = ['name', 'company_name']
@@ -68,14 +81,28 @@ class Invoice(models.Model):
     
     @property
     def tax_amount(self):
-        return sum(item.amount for item in self.items.all()) * self.tax_rate / 100
+        # Using prefetched items if available
+        if hasattr(self, '_prefetched_objects_cache') and 'items' in self._prefetched_objects_cache:
+            items_total = sum(item.amount for item in self._prefetched_objects_cache['items'])
+        else:
+            items_total = sum(item.amount for item in self.items.all())
+        return items_total * self.tax_rate / 100
     
     @property
     def total_amount(self):
-        return sum(item.amount for item in self.items.all()) + self.tax_amount
+        # Using prefetched items if available
+        if hasattr(self, '_prefetched_objects_cache') and 'items' in self._prefetched_objects_cache:
+            items_total = sum(item.amount for item in self._prefetched_objects_cache['items'])
+        else:
+            items_total = sum(item.amount for item in self.items.all())
+        return items_total + (items_total * self.tax_rate / 100)
     
     @property
     def paid_amount(self):
+        # Use prefetched payments if available
+        if hasattr(self, '_prefetched_objects_cache') and 'payments' in self._prefetched_objects_cache:
+            return sum(payment.amount for payment in self._prefetched_objects_cache['payments'] 
+                      if payment.status == 'COMPLETED')
         return sum(payment.amount for payment in self.payments.filter(status='COMPLETED'))
     
     @property
@@ -83,13 +110,17 @@ class Invoice(models.Model):
         return self.total_amount - self.paid_amount
     
     @property
-    def overdue_days(self):
+    def days_overdue(self):
         if self.status == 'OVERDUE':
             return (timezone.now().date() - self.due_date).days
         return 0
     
     @property
     def pending_payments(self):
+        # Use prefetched payments if available
+        if hasattr(self, '_prefetched_objects_cache') and 'payments' in self._prefetched_objects_cache:
+            return sum(payment.amount for payment in self._prefetched_objects_cache['payments'] 
+                      if payment.status == 'PENDING')
         return sum(payment.amount for payment in self.payments.filter(status='PENDING'))
     
     

@@ -13,7 +13,7 @@ from finance.views import (
     ClientModelViewset,
     InvoiceViewSet,
     PaymentViewSet,
-    InvoicePaymentViewSet
+    MakeInvoicePaymentViewSet
 )
 
 from api.views import notify_customers_view, refine_attendance_records_view, generate_attendance_reports_view
@@ -23,7 +23,7 @@ router = routers.DefaultRouter()
 router.register('languages', LanguageViewSet, basename='languages')
 router.register(r'organizations', OrganizationViewSet, basename='organizations')
 router.register('users', UserViewSet, basename='users')
-router.register('invoice-payments', InvoicePaymentViewSet, basename='invoice-payments')  # Standalone route
+router.register('make-invoice-payments', MakeInvoicePaymentViewSet, basename='make-invoice-payments')
 
 # Nested routers
 user_invitation_router = routers.NestedDefaultRouter(router, r'users', lookup='user')

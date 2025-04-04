@@ -235,18 +235,15 @@ class InvoiceSerializer(serializers.ModelSerializer):
     tax_amount = serializers.SerializerMethodField()
     paid_amount = serializers.SerializerMethodField()
     due_balance = serializers.SerializerMethodField()
-    overdue_days = serializers.SerializerMethodField()
-    
-    
     pending_payments = serializers.SerializerMethodField()
     
     class Meta:
         model = Invoice
         fields = [
             'id','client', 'invoice_number', 'issue_date',
-            'due_date', 'status', 'tax_rate', 'notes', 'days_overdue',
-            'total_amount', 'tax_amount', 'paid_amount',
-            'due_balance', 'overdue_days', 'pending_payments',
+            'due_date', 'status', 'tax_rate', 'notes',
+            'total_amount', 'tax_amount', 'paid_amount', 'due_balance', 'days_overdue',
+            'pending_payments',
             'created_at', 'updated_at', 'items'
         ]
         
@@ -254,28 +251,34 @@ class InvoiceSerializer(serializers.ModelSerializer):
     def get_client(self, obj):
         return obj.client.name
     
-    def get_days_overdue(self, obj):
-        if obj.status == 'OVERDUE':
-            return (timezone.now().date() - obj.due_date).days
-        return 0
-    
     def get_total_amount(self, obj):
+        if hasattr(obj, 'calculated_total'):
+            return obj.calculated_total
         return obj.total_amount
     
     def get_tax_amount(self, obj):
+        if hasattr(obj, 'calculated_tax'):
+            return obj.calculated_tax
         return obj.tax_amount
     
     def get_paid_amount(self, obj):
+        if hasattr(obj, 'completed_payments_sum'):
+            return obj.completed_payments_sum
         return obj.paid_amount
     
     def get_due_balance(self, obj):
+        if hasattr(obj, 'calculated_balance'):
+            return obj.calculated_balance
         return obj.due_balance
     
-    def get_overdue_days(self, obj):
-        return obj.overdue_days
+    def get_days_overdue(self, obj):
+        return obj.days_overdue
     
     def get_pending_payments(self, obj):
+        if hasattr(obj, 'pending_payments_sum'):
+            return obj.pending_payments_sum
         return obj.pending_payments
+    
     
 
 # ================================ Invoice Item Serializers ================================

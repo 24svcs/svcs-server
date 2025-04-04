@@ -1,5 +1,5 @@
 from rest_framework.viewsets import ModelViewSet, GenericViewSet
-from rest_framework.mixins import CreateModelMixin, RetrieveModelMixin
+from rest_framework.mixins import CreateModelMixin
 from .serializers import (
     Client, ClientSerializer, CreateClientSerializer,
     Invoice, InvoiceSerializer, CreateInvoiceSerializer, UpdateInvoiceSerializer,
@@ -10,16 +10,15 @@ from api.pagination import DefaultPagination
 from django_filters.rest_framework import DjangoFilterBackend
 from .filters import ClientFilter, InvoiceFilter
 from django.db import models, transaction
-from django.db.models import F, Q, Sum, Avg, Count, DecimalField, Value, ExpressionWrapper
-from django.db.models.functions import Coalesce
+from django.db.models import Q, Sum, Count
 from rest_framework.response import Response
 from django.utils import timezone
 from datetime import timedelta
 from rest_framework.decorators import action
 from rest_framework import status
 from rest_framework import  filters
-from decimal import Decimal     
-from finance.models import InvoiceItem
+
+
 
 class ClientModelViewset(ModelViewSet):
     pagination_class = DefaultPagination
@@ -31,7 +30,20 @@ class ClientModelViewset(ModelViewSet):
     permission_classes = [IsAuthenticated]
     
     def get_queryset(self):
-        return Client.objects.select_related('address').prefetch_related('invoices', 'payments').filter(organization_id=self.kwargs['organization_pk'])
+        from django.db.models import Prefetch
+        
+        # Optimize invoice queries with their items
+        invoice_queryset = Invoice.objects.prefetch_related(
+            'items'
+        )
+        
+        # Optimize payment queries 
+        payment_queryset = Payment.objects.select_related('invoice')
+        
+        return Client.objects.select_related('address').prefetch_related(
+            Prefetch('invoices', queryset=invoice_queryset),
+            Prefetch('payments', queryset=payment_queryset)
+        ).filter(organization_id=self.kwargs['organization_pk'])
     
     serializer_class = ClientSerializer
     
@@ -53,7 +65,6 @@ class ClientModelViewset(ModelViewSet):
             serializer = self.get_serializer(page, many=True)
             response = self.get_paginated_response(serializer.data)
             
-            # Get current date for new clients calculation
             current_date = timezone.now()
             thirty_days_ago = current_date - timedelta(days=30)
             
@@ -92,9 +103,10 @@ class InvoiceViewSet(ModelViewSet):
     filterset_class = InvoiceFilter
     
     def get_queryset(self):
+        from django.db.models import Prefetch
         return Invoice.objects.select_related('client').prefetch_related(
             'items',
-            'payments'
+            Prefetch('payments', queryset=Payment.objects.all().select_related('invoice', 'client'))
         ).filter(organization_id=self.kwargs['organization_pk'])
   
 
@@ -172,6 +184,12 @@ class InvoiceViewSet(ModelViewSet):
             )
             
             
+    
+ 
+    
+    
+            
+            
             
             
 # ================================ Payment Viewset ================================
@@ -183,7 +201,8 @@ class PaymentViewSet(ModelViewSet):
     def get_queryset(self):
         return Payment.objects.select_related(
             'client',
-            'invoice'
+            'invoice',
+            'client__address'  # Also select client address to avoid additional queries
         ).filter(
             client__organization_id=self.kwargs['organization_pk']
         ).order_by('-created_at')
@@ -325,7 +344,7 @@ class PaymentViewSet(ModelViewSet):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
     
-class InvoicePaymentViewSet(GenericViewSet, CreateModelMixin):
+class MakeInvoicePaymentViewSet(GenericViewSet, CreateModelMixin):
     """
     A simplified viewset for creating payments using only invoice ID.
     This viewset only supports creating new payments.
@@ -339,11 +358,9 @@ class InvoicePaymentViewSet(GenericViewSet, CreateModelMixin):
         serializer.is_valid(raise_exception=True)
         payment = serializer.save()
         
-        # Return the payment details
         return Response(
             PaymentSerializer(payment).data,
             status=status.HTTP_201_CREATED
         )
     
-    
-    
+   
