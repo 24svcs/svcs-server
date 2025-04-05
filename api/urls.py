@@ -1,5 +1,6 @@
 from django.urls import path, include
 from rest_framework_nested import routers
+from rest_framework_nested.routers import NestedSimpleRouter
 from core.views import LanguageViewSet, UserViewSet, UserInvitationViewSet
 from organization.views import OrganizationViewSet, MemberViewSet, InvitationViewSet
 from human_resources.views import (
@@ -13,7 +14,9 @@ from finance.views import (
     ClientModelViewset,
     InvoiceViewSet,
     PaymentViewSet,
-    MakeInvoicePaymentViewSet
+    MakeInvoicePaymentViewSet,
+    BulkInvoiceItemViewSet,
+    RecurringInvoiceViewSet
 )
 
 from api.views import notify_customers_view, refine_attendance_records_view, generate_attendance_reports_view
@@ -59,6 +62,13 @@ invoice_router.register('invoices', InvoiceViewSet, basename='invoice')
 payment_router = routers.NestedDefaultRouter(router, r'organizations', lookup='organization')
 payment_router.register('payments', PaymentViewSet, basename='payment')
 
+# New router for bulk invoice items, nested under both organization and invoice
+bulk_items_router = routers.NestedSimpleRouter(invoice_router, r'invoices', lookup='invoice')
+bulk_items_router.register(r'bulk-items', BulkInvoiceItemViewSet, basename='bulk-invoice-items')
+
+recurring_invoice_router = routers.NestedDefaultRouter(router, r'organizations', lookup='organization')
+recurring_invoice_router.register('recurring-invoices', RecurringInvoiceViewSet, basename='recurring-invoice')
+
 urlpatterns = [
     path(r'', include(router.urls)),
     path(r'', include(member_router.urls)),
@@ -72,6 +82,8 @@ urlpatterns = [
     path(r'', include(client_router.urls)),
     path(r'', include(invoice_router.urls)),
     path(r'', include(payment_router.urls)),
+    path(r'', include(bulk_items_router.urls)),
+    path(r'', include(recurring_invoice_router.urls)),
     path(r'notify-customers/', notify_customers_view, name='notify-customers'),
     path(r'refine-attendance-records/', refine_attendance_records_view, name='refine-attendance-records'),
     path(r'generate-attendance-reports/', generate_attendance_reports_view, name='generate-attendance-reports'),

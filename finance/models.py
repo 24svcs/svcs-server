@@ -242,3 +242,110 @@ class Payment(models.Model):
         """Override save to trigger invoice status update."""
         super().save(*args, **kwargs)
         self.invoice.update_status_based_on_payments()
+
+class RecurringInvoice(models.Model):
+    """
+    Model for recurring invoice templates that automatically generate
+    new invoices at specified intervals.
+    """
+    FREQUENCY_CHOICES = [
+        ('WEEKLY', 'Weekly'),
+        ('BIWEEKLY', 'Bi-Weekly'),
+        ('MONTHLY', 'Monthly'),
+        ('QUARTERLY', 'Quarterly'), 
+        ('YEARLY', 'Yearly'),
+    ]
+    
+    STATUS_CHOICES = [
+        ('ACTIVE', 'Active'),
+        ('PAUSED', 'Paused'),
+        ('COMPLETED', 'Completed'),
+        ('CANCELLED', 'Cancelled'),
+    ]
+    
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, unique=True)
+    organization = models.ForeignKey(Organization, models.CASCADE, related_name='recurring_invoices')
+    client = models.ForeignKey(Client, on_delete=models.CASCADE, related_name='recurring_invoices')
+    title = models.CharField(max_length=255)
+    frequency = models.CharField(max_length=20, choices=FREQUENCY_CHOICES)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='ACTIVE')
+    start_date = models.DateField()
+    end_date = models.DateField(null=True, blank=True)
+    tax_rate = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal('0.00'))
+    notes = models.TextField(blank=True)
+    next_generation_date = models.DateField()
+    payment_due_days = models.PositiveIntegerField(default=30)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"{self.title} - {self.client.name} ({self.frequency})"
+    
+    def calculate_next_generation_date(self):
+        """Calculate the next date when an invoice should be generated."""
+        from datetime import timedelta
+        from dateutil.relativedelta import relativedelta
+        
+        if not self.next_generation_date:
+            self.next_generation_date = self.start_date
+            return
+        
+        current_date = self.next_generation_date
+        
+        if self.frequency == 'WEEKLY':
+            next_date = current_date + timedelta(days=7)
+        elif self.frequency == 'BIWEEKLY':
+            next_date = current_date + timedelta(days=14)
+        elif self.frequency == 'MONTHLY':
+            next_date = current_date + relativedelta(months=1)
+        elif self.frequency == 'QUARTERLY':
+            next_date = current_date + relativedelta(months=3)
+        elif self.frequency == 'YEARLY':
+            next_date = current_date + relativedelta(years=1)
+        else:
+            next_date = current_date + relativedelta(months=1)  # Default to monthly
+        
+        # If end_date is set and next_date exceeds it, mark as completed
+        if self.end_date and next_date > self.end_date:
+            self.status = 'COMPLETED'
+            self.save(update_fields=['status'])
+            return
+        
+        self.next_generation_date = next_date
+        self.save(update_fields=['next_generation_date'])
+        
+        return next_date
+    
+    def is_due_for_generation(self):
+        """Check if it's time to generate a new invoice."""
+        today = timezone.now().date()
+        return (self.status == 'ACTIVE' and 
+                self.next_generation_date <= today and 
+                (not self.end_date or self.end_date >= today))
+
+class RecurringInvoiceItem(models.Model):
+    """
+    Template items for recurring invoices.
+    These are used as templates when generating actual invoice items.
+    """
+    recurring_invoice = models.ForeignKey(RecurringInvoice, on_delete=models.CASCADE, related_name='items')
+    product = models.CharField(max_length=255)
+    description = models.CharField(max_length=1000)
+    quantity = models.DecimalField(
+        max_digits=10, 
+        decimal_places=2, 
+        validators=[MinValueValidator(Decimal('0.01'))]
+    )
+    unit_price = models.DecimalField(
+        max_digits=10, 
+        decimal_places=2, 
+        validators=[MinValueValidator(Decimal('0.00'))]
+    )
+
+    def __str__(self):
+        return f"{self.product} - {self.recurring_invoice.title}"
+    
+    @property
+    def amount(self):
+        """Calculate the line item total (quantity * unit_price)."""
+        return self.quantity * self.unit_price

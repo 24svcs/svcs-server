@@ -1,10 +1,13 @@
 from rest_framework.viewsets import ModelViewSet, GenericViewSet
-from rest_framework.mixins import CreateModelMixin
+from rest_framework.mixins import CreateModelMixin, DestroyModelMixin
 
 from .serializers import (
     Client, ClientSerializer, CreateClientSerializer,
     Invoice, InvoiceSerializer, CreateInvoiceSerializer, UpdateInvoiceSerializer,
-    Payment, PaymentSerializer, CreatePaymentSerializer, UpdatePaymentSerializer
+    Payment, PaymentSerializer, CreatePaymentSerializer, UpdatePaymentSerializer,
+    InvoiceItem, BulkInvoiceItemSerializer,
+    RecurringInvoice, RecurringInvoiceSerializer, CreateRecurringInvoiceSerializer, UpdateRecurringInvoiceSerializer,
+
 )
 from rest_framework.permissions import IsAuthenticated
 from api.pagination import DefaultPagination
@@ -19,6 +22,8 @@ from rest_framework.decorators import action
 from rest_framework import status
 from rest_framework import filters
 from .utils import annotate_invoice_calculations, calculate_payment_statistics
+from api.throttling import BurstRateThrottle, SustainedRateThrottle
+import uuid
 
 
 
@@ -105,6 +110,7 @@ class InvoiceViewSet(ModelViewSet):
     ordering = ['-created_at']  # Default ordering
     permission_classes = [IsAuthenticated]
     filterset_class = InvoiceFilter
+    throttle_classes = [BurstRateThrottle, SustainedRateThrottle]
     
     def get_queryset(self):
         from django.db.models import Prefetch
@@ -246,6 +252,7 @@ class PaymentViewSet(ModelViewSet):
     search_fields = ['invoice__invoice_number', 'client__name', 'transaction_id']
     ordering_fields = ['payment_date', 'amount', 'status', 'created_at']
     ordering = ['-created_at']  # Default ordering
+    throttle_classes = [BurstRateThrottle, SustainedRateThrottle]
     
     def get_queryset(self):
         return Payment.objects.select_related(
@@ -400,5 +407,187 @@ class MakeInvoicePaymentViewSet(GenericViewSet, CreateModelMixin):
             PaymentSerializer(payment).data,
             status=status.HTTP_201_CREATED
         )
+    
+# ================================ Bulk Invoice Item Operations ================================
+class BulkInvoiceItemViewSet(GenericViewSet, CreateModelMixin, DestroyModelMixin):
+    """
+    ViewSet for bulk operations on invoice items.
+    Supports:
+    - Bulk create: POST /organizations/{organization_id}/invoices/{invoice_uuid}/bulk-items/
+    - Bulk delete: DELETE /organizations/{organization_id}/invoices/{invoice_uuid}/bulk-items/?ids=1,2,3
+    """
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [BurstRateThrottle]
+    
+    def get_serializer_class(self):
+        return BulkInvoiceItemSerializer
+    
+    def get_queryset(self):
+        return InvoiceItem.objects.filter(
+            invoice__organization_id=self.kwargs['organization_pk'],
+            invoice__uuid=self.kwargs['invoice_uuid']
+        )
+    
+    def create(self, request, *args, **kwargs):
+        # Add invoice_id to the data
+        data = request.data.copy()
+        data['invoice_id'] = kwargs['invoice_uuid']
+        
+        serializer = self.get_serializer(data=data)
+        serializer.is_valid(raise_exception=True)
+        items = serializer.save()
+        
+        return Response(serializer.to_representation(items), status=status.HTTP_201_CREATED)
+    
+    def destroy(self, request, *args, **kwargs):
+        # Get item IDs from query params
+        item_ids = request.query_params.get('ids', '').split(',')
+        item_ids = [id.strip() for id in item_ids if id.strip()]
+        
+        if not item_ids:
+            return Response(
+                {"detail": "No item IDs provided. Use ?ids=1,2,3 query parameter."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Filter by provided IDs and organization
+        queryset = self.get_queryset().filter(id__in=item_ids)
+        
+        # Check if invoice is editable
+        invoice = Invoice.objects.filter(
+            organization_id=self.kwargs['organization_pk'],
+            uuid=self.kwargs['invoice_uuid']
+        ).first()
+        
+        if not invoice:
+            return Response(
+                {"detail": "Invoice not found"},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        if invoice.status not in ['DRAFT', 'PENDING']:
+            return Response(
+                {"detail": f"Cannot modify items for invoice in {invoice.status} status"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Delete matching items
+        count = queryset.count()
+        if count == 0:
+            return Response(
+                {"detail": "No items found matching the provided IDs"},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        queryset.delete()
+        
+        return Response(
+            {"detail": f"{count} invoice items deleted successfully"},
+            status=status.HTTP_200_OK
+        )
+    
+# ================================ Recurring Invoice Viewset ================================
+class RecurringInvoiceViewSet(ModelViewSet):
+    pagination_class = DefaultPagination
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    search_fields = [
+        'title',
+        'client__name',
+        'client__company_name',
+    ]
+    ordering_fields = ['start_date', 'next_generation_date', 'created_at', 'status']
+    ordering = ['-created_at']
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [BurstRateThrottle, SustainedRateThrottle]
+    
+    def get_queryset(self):
+        return RecurringInvoice.objects.select_related('client').prefetch_related(
+            'items'
+        ).filter(organization_id=self.kwargs['organization_pk'])
+    
+    def get_serializer_class(self):
+        if self.action == 'create':
+            return CreateRecurringInvoiceSerializer
+        elif self.action in ['update', 'partial_update']:
+            return UpdateRecurringInvoiceSerializer
+        return RecurringInvoiceSerializer
+    
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context['organization_id'] = self.kwargs['organization_pk']
+        return context
+    
+    @action(detail=True, methods=['post'])
+    def generate_invoice(self, request, organization_pk=None, pk=None):
+        """
+        Manually generate a new invoice from this recurring template.
+        """
+        recurring_invoice = self.get_object()
+        
+        # Check if recurring invoice is active
+        if recurring_invoice.status != 'ACTIVE':
+            return Response(
+                {"detail": f"Cannot generate invoice from a {recurring_invoice.status} recurring template"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            with transaction.atomic():
+                # Generate the invoice using our utility function
+                invoice = self._create_invoice_from_template(recurring_invoice)
+                
+                # Update next generation date
+                recurring_invoice.calculate_next_generation_date()
+                
+                # Return the created invoice
+                return Response({
+                    "detail": "Invoice created successfully",
+                    "invoice": InvoiceSerializer(invoice).data
+                }, status=status.HTTP_201_CREATED)
+                
+        except Exception as e:
+            return Response(
+                {"detail": f"Failed to generate invoice: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+    
+    def _create_invoice_from_template(self, recurring_invoice):
+        """
+        Create a new invoice from a recurring invoice template.
+        """
+        # Calculate dates
+        today = timezone.now().date()
+        due_date = today + timedelta(days=recurring_invoice.payment_due_days)
+        
+        # Generate a unique invoice number
+        random_suffix = str(uuid.uuid4().hex)[:6].upper()
+        invoice_number = f"INV-{random_suffix}"
+        while Invoice.objects.filter(invoice_number=invoice_number).exists():
+            random_suffix = str(uuid.uuid4().hex)[:6].upper()
+            invoice_number = f"INV-{random_suffix}"
+        
+        # Create the invoice
+        invoice = Invoice.objects.create(
+            organization_id=recurring_invoice.organization_id,
+            client=recurring_invoice.client,
+            invoice_number=invoice_number,
+            issue_date=today,
+            due_date=due_date,
+            status='DRAFT',
+            tax_rate=recurring_invoice.tax_rate,
+            notes=f"Generated from recurring template: {recurring_invoice.title}\n\n{recurring_invoice.notes}".strip()
+        )
+        
+        # Create all invoice items from the template
+        for template_item in recurring_invoice.items.all():
+            InvoiceItem.objects.create(
+                invoice=invoice,
+                product=template_item.product,
+                description=template_item.description,
+                quantity=template_item.quantity,
+                unit_price=template_item.unit_price
+            )
+        
+        return invoice
     
    

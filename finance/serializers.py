@@ -2,12 +2,13 @@ from rest_framework import serializers
 from decimal import Decimal
 from django.utils import timezone
 from django.db import transaction
-from .models import Client, Invoice, InvoiceItem, Payment
+from .models import Client, Invoice, InvoiceItem, Payment, RecurringInvoice, RecurringInvoiceItem
 import uuid
 from decimal import DecimalException
 from api.libs import validate_phone
 from phonenumber_field.modelfields import PhoneNumberField
 from .utils import annotate_invoice_calculations
+
 
 
 
@@ -472,5 +473,258 @@ class UpdatePaymentSerializer(serializers.ModelSerializer):
             instance.invoice.update_status_based_on_payments()
             
             return instance
+        
+        
+# ================================ Bulk Invoice Item Serializers ================================
+class BulkInvoiceItemSerializer(serializers.Serializer):
+    items = CreateInvoiceItemSerializer(many=True)
+    invoice_id = serializers.UUIDField()
+    
+    def validate_invoice_id(self, value):
+        try:
+            invoice = Invoice.objects.get(uuid=value)
+            
+            # Check if invoice is in an editable state
+            if invoice.status not in ['DRAFT', 'PENDING']:
+                raise serializers.ValidationError(
+                    f"Cannot modify items for invoice in {invoice.status} status. "
+                    "Only DRAFT or PENDING invoices can be modified."
+                )
+            
+            return value
+        except Invoice.DoesNotExist:
+            raise serializers.ValidationError("Invalid invoice ID")
+    
+    def validate(self, data):
+        # Ensure there's at least one item
+        if not data.get('items'):
+            raise serializers.ValidationError({
+                "items": "Must provide at least one invoice item"
+            })
+        
+        # Validate each item
+        for item in data['items']:
+            if item.get('quantity', 0) <= 0:
+                raise serializers.ValidationError({
+                    "items": "Item quantity must be greater than 0"
+                })
+            if item.get('unit_price', 0) < 0:
+                raise serializers.ValidationError({
+                    "items": "Item unit price cannot be negative"
+                })
+        
+        return data
+    
+    @transaction.atomic
+    def create(self, validated_data):
+        items_data = validated_data.pop('items')
+        invoice_id = validated_data.pop('invoice_id')
+        
+        invoice = Invoice.objects.get(uuid=invoice_id)
+        created_items = []
+        
+        for item_data in items_data:
+            item = InvoiceItem.objects.create(
+                invoice=invoice,
+                **item_data
+            )
+            created_items.append(item)
+        
+        return created_items
+    
+    def to_representation(self, instance):
+        return {
+            "detail": f"{len(instance)} invoice items created successfully",
+            "items": InvoiceItemSerializer(instance, many=True).data
+        }
+        
+        
+# ================================ Recurring Invoice Item Serializers ================================
+class RecurringInvoiceItemSerializer(serializers.ModelSerializer):
+    amount = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = RecurringInvoiceItem
+        fields = ['id', 'product', 'description', 'quantity', 'unit_price', 'amount']
+        read_only_fields = ['amount']
+    
+    def get_amount(self, obj):
+        return obj.amount
+    
+    def validate_quantity(self, value):
+        if value <= Decimal('0'):
+            raise serializers.ValidationError("Quantity must be greater than 0")
+        return value
+    
+    def validate_unit_price(self, value):
+        if value < Decimal('0'):
+            raise serializers.ValidationError("Unit price cannot be negative")
+        return value
+
+class CreateRecurringInvoiceItemSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = RecurringInvoiceItem
+        fields = ['product', 'description', 'quantity', 'unit_price']
+        
+    def validate_quantity(self, value):
+        try:
+            value = Decimal(str(value))
+            if value <= Decimal('0'):
+                raise serializers.ValidationError("Quantity must be greater than 0")
+            return value
+        except (TypeError, ValueError, DecimalException):
+            raise serializers.ValidationError("Invalid decimal value")
+    
+    def validate_unit_price(self, value):
+        try:
+            value = Decimal(str(value))
+            if value < Decimal('0'):
+                raise serializers.ValidationError("Unit price cannot be negative")
+            return value
+        except (TypeError, ValueError, DecimalException):
+            raise serializers.ValidationError("Invalid decimal value")
+
+# ================================ Recurring Invoice Serializers ================================
+class RecurringInvoiceSerializer(serializers.ModelSerializer):
+    items = RecurringInvoiceItemSerializer(many=True, read_only=True)
+    client_name = serializers.CharField(source='client.name', read_only=True)
+    
+    class Meta:
+        model = RecurringInvoice
+        fields = [
+            'uuid', 'client', 'client_name', 'title', 'frequency', 'status',
+            'start_date', 'end_date', 'tax_rate', 'notes', 'next_generation_date',
+            'payment_due_days', 'created_at', 'updated_at', 'items'
+        ]
+        read_only_fields = ['uuid', 'client_name', 'created_at', 'updated_at']
+
+class CreateRecurringInvoiceSerializer(serializers.ModelSerializer):
+    items = CreateRecurringInvoiceItemSerializer(many=True)
+    client_id = serializers.IntegerField()
+    
+    class Meta:
+        model = RecurringInvoice
+        fields = [
+            'client_id', 'title', 'frequency', 'start_date', 'end_date',
+            'tax_rate', 'payment_due_days', 'notes', 'items'
+        ]
+    
+    def validate_client_id(self, value):
+        try:
+            organization_id = self.context.get('organization_id')
+            client = Client.objects.filter(
+                id=value,
+                organization_id=organization_id,
+                is_active=True
+            ).first()
+            
+            if not client:
+                raise serializers.ValidationError("Invalid or inactive client ID")
+                
+            return value
+        except (TypeError, ValueError):
+            raise serializers.ValidationError("Client ID must be a valid integer")
+    
+    def validate_tax_rate(self, value):
+        try:
+            value = Decimal(str(value))
+            if value < Decimal('0') or value > Decimal('100'):
+                raise serializers.ValidationError("Tax rate must be between 0 and 100")
+            return value
+        except (TypeError, ValueError, DecimalException):
+            raise serializers.ValidationError("Invalid decimal value")
+    
+    def validate_frequency(self, value):
+        valid_frequencies = [choice[0] for choice in RecurringInvoice.FREQUENCY_CHOICES]
+        if value not in valid_frequencies:
+            raise serializers.ValidationError(f"Frequency must be one of: {', '.join(valid_frequencies)}")
+        return value
+    
+    def validate(self, data):
+        # Ensure start_date is not in the past
+        if data.get('start_date') and data['start_date'] < timezone.now().date():
+            raise serializers.ValidationError({
+                "start_date": "Start date cannot be in the past"
+            })
+        
+        # Check if end_date is after start_date
+        if data.get('end_date') and data.get('start_date') and data['end_date'] <= data['start_date']:
+            raise serializers.ValidationError({
+                "end_date": "End date must be after start date"
+            })
+        
+        # Ensure there's at least one item
+        if not data.get('items'):
+            raise serializers.ValidationError({
+                "items": "Recurring invoice must have at least one item"
+            })
+            
+        return data
+    
+    @transaction.atomic
+    def create(self, validated_data):
+        items_data = validated_data.pop('items')
+        client_id = validated_data.pop('client_id')
+        organization_id = self.context['organization_id']
+        
+        # Set the next_generation_date to the start_date initially
+        validated_data['next_generation_date'] = validated_data['start_date']
+        
+        # Create recurring invoice
+        recurring_invoice = RecurringInvoice.objects.create(
+            client_id=client_id,
+            organization_id=organization_id,
+            **validated_data
+        )
+        
+        # Create all items
+        for item_data in items_data:
+            RecurringInvoiceItem.objects.create(
+                recurring_invoice=recurring_invoice,
+                **item_data
+            )
+        
+        return recurring_invoice
+
+class UpdateRecurringInvoiceSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = RecurringInvoice
+        fields = ['title', 'frequency', 'status', 'end_date', 'tax_rate', 'payment_due_days', 'notes']
+    
+    def validate_frequency(self, value):
+        valid_frequencies = [choice[0] for choice in RecurringInvoice.FREQUENCY_CHOICES]
+        if value not in valid_frequencies:
+            raise serializers.ValidationError(f"Frequency must be one of: {', '.join(valid_frequencies)}")
+        return value
+    
+    def validate_status(self, value):
+        valid_statuses = [choice[0] for choice in RecurringInvoice.FREQUENCY_CHOICES]
+        if value not in valid_statuses:
+            raise serializers.ValidationError(f"Status must be one of: {', '.join(valid_statuses)}")
+        return value
+    
+    def validate_tax_rate(self, value):
+        try:
+            value = Decimal(str(value))
+            if value < Decimal('0') or value > Decimal('100'):
+                raise serializers.ValidationError("Tax rate must be between 0 and 100")
+            return value
+        except (TypeError, ValueError, DecimalException):
+            raise serializers.ValidationError("Invalid decimal value")
+    
+    def validate(self, data):
+        # Cannot modify a completed or cancelled recurring invoice
+        if self.instance.status in ['COMPLETED', 'CANCELLED'] and 'status' not in data:
+            raise serializers.ValidationError({
+                "non_field_errors": f"Cannot modify a recurring invoice with {self.instance.status} status"
+            })
+        
+        # Check if end_date is after start_date
+        if data.get('end_date') and data['end_date'] <= self.instance.start_date:
+            raise serializers.ValidationError({
+                "end_date": "End date must be after start date"
+            })
+            
+        return data
         
         

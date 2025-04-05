@@ -1,4 +1,3 @@
-
 from pathlib import Path
 import os
 from celery.schedules import crontab
@@ -89,6 +88,16 @@ REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": (
         "core.authentication.ClerkAuthentication",
     ),
+    'DEFAULT_THROTTLE_CLASSES': [
+        'api.throttling.BurstRateThrottle',
+        'api.throttling.SustainedRateThrottle',
+        'api.throttling.AnonymousRateThrottle',
+    ],
+    'DEFAULT_THROTTLE_RATES': {
+        'burst': '60/min',
+        'sustained': '1000/day',
+        'anon': '20/hour',
+    }
 }
 
 LANGUAGE_CODE = 'en-us'
@@ -134,5 +143,10 @@ CELERY_BEAT_SCHEDULE = {
     'refine_attendance_records': {
         'task': 'api.jobs.refine_attendance_record.refine_attendance_records',
         'schedule': crontab(day_of_week=0),
+    },
+    'generate_recurring_invoices': {
+        'task': 'api.jobs.generate_invoices.generate_recurring_invoices',
+        'schedule': crontab(hour=0, minute=0),  # Run daily at midnight
+        'args': ()
     }
 }
