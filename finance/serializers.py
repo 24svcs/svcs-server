@@ -187,6 +187,19 @@ class CreatePaymentSerializer(serializers.ModelSerializer):
                           (f"Note: There are already pending payments of {pending_payments_total}." if pending_payments_total > 0 else "")
             })
         
+        # Check for partial payment restrictions
+        if data['amount'] < available_to_pay:  # This is a partial payment
+            if not invoice.allow_partial_payments:
+                raise serializers.ValidationError({
+                    "amount": f"This invoice does not allow partial payments. Payment amount must be {available_to_pay}."
+                })
+            
+            # Check if payment meets minimum amount requirement
+            if data['amount'] < invoice.minimum_payment_amount:
+                raise serializers.ValidationError({
+                    "amount": f"Payment amount must be at least {invoice.minimum_payment_amount} for partial payments."
+                })
+        
         return data
     
     @transaction.atomic
@@ -227,6 +240,9 @@ class InvoiceSerializer(serializers.ModelSerializer):
     paid_amount = serializers.SerializerMethodField()
     due_balance = serializers.SerializerMethodField()
     pending_payments = serializers.SerializerMethodField()
+    late_fee_amount = serializers.SerializerMethodField()
+    total_with_late_fees = serializers.SerializerMethodField()
+    payment_progress_percentage = serializers.SerializerMethodField()
     
     class Meta:
         model = Invoice
@@ -234,8 +250,9 @@ class InvoiceSerializer(serializers.ModelSerializer):
             'id','client', 'invoice_number', 'issue_date',
             'due_date', 'status', 'tax_rate', 'notes',
             'total_amount', 'tax_amount', 'paid_amount', 'due_balance', 'days_overdue',
-            'pending_payments',
-            'created_at', 'updated_at', 'items', 'uuid'
+            'pending_payments', 'late_fee_percentage', 'late_fee_applied', 'late_fee_amount',
+            'total_with_late_fees', 'payment_progress_percentage', 'allow_partial_payments',
+            'minimum_payment_amount', 'created_at', 'updated_at', 'items', 'uuid'
         ]
         
         
@@ -259,6 +276,15 @@ class InvoiceSerializer(serializers.ModelSerializer):
     
     def get_pending_payments(self, obj):
         return obj.pending_payments
+    
+    def get_late_fee_amount(self, obj):
+        return obj.late_fee_amount
+    
+    def get_total_with_late_fees(self, obj):
+        return obj.total_with_late_fees
+    
+    def get_payment_progress_percentage(self, obj):
+        return obj.payment_progress_percentage
     
     
 
@@ -296,7 +322,8 @@ class CreateInvoiceSerializer(serializers.ModelSerializer):
         model = Invoice
         fields = [
             'client_id', 'issue_date', 'due_date', 'tax_rate',
-            'notes', 'items'
+            'notes', 'items', 'late_fee_percentage', 'allow_partial_payments',
+            'minimum_payment_amount'
         ]
     
     def validate_client_id(self, value):
@@ -341,6 +368,27 @@ class CreateInvoiceSerializer(serializers.ModelSerializer):
         if not data.get('items'):
             raise serializers.ValidationError({
                 "items": "Invoice must have at least one item"
+            })
+            
+        # Validate partial payment settings
+        allow_partial = data.get('allow_partial_payments', False)
+        minimum_payment = data.get('minimum_payment_amount', Decimal('0.00'))
+        
+        if allow_partial and minimum_payment <= 0:
+            raise serializers.ValidationError({
+                "minimum_payment_amount": "Minimum payment amount must be greater than 0 when partial payments are allowed"
+            })
+            
+        if not allow_partial and minimum_payment > 0:
+            raise serializers.ValidationError({
+                "minimum_payment_amount": "Minimum payment amount should be 0 when partial payments are not allowed"
+            })
+        
+        # Validate late fee percentage
+        late_fee = data.get('late_fee_percentage', Decimal('0.00'))
+        if late_fee < 0 or late_fee > 100:
+            raise serializers.ValidationError({
+                "late_fee_percentage": "Late fee percentage must be between 0 and 100"
             })
             
         return data
@@ -388,7 +436,8 @@ class UpdateInvoiceSerializer(serializers.ModelSerializer):
     class Meta:
         model = Invoice
         fields = [
-            'tax_rate', 'notes', 'items'
+            'tax_rate', 'notes', 'items', 'late_fee_percentage', 
+            'allow_partial_payments', 'minimum_payment_amount'
         ]
     
     def validate(self, data):
@@ -429,6 +478,28 @@ class UpdateInvoiceSerializer(serializers.ModelSerializer):
                     raise serializers.ValidationError({
                         "items": "Item unit price cannot be negative"
                     })
+        
+        # Validate partial payment settings
+        allow_partial = data.get('allow_partial_payments', self.instance.allow_partial_payments)
+        minimum_payment = data.get('minimum_payment_amount', self.instance.minimum_payment_amount)
+        
+        if allow_partial and minimum_payment <= 0:
+            raise serializers.ValidationError({
+                "minimum_payment_amount": "Minimum payment amount must be greater than 0 when partial payments are allowed"
+            })
+            
+        if not allow_partial and minimum_payment > 0:
+            raise serializers.ValidationError({
+                "minimum_payment_amount": "Minimum payment amount should be 0 when partial payments are not allowed"
+            })
+        
+        # Validate late fee percentage
+        if 'late_fee_percentage' in data:
+            late_fee = data['late_fee_percentage']
+            if late_fee < 0 or late_fee > 100:
+                raise serializers.ValidationError({
+                    "late_fee_percentage": "Late fee percentage must be between 0 and 100"
+                })
         
         return data
     

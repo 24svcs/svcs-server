@@ -158,5 +158,16 @@ CELERY_BEAT_SCHEDULE = {
         'task': 'api.jobs.generate_invoices.generate_recurring_invoices',
         'schedule': crontab(hour=0, minute=0),  # Run daily at midnight
         'args': ()
+    },
+    # New tasks for invoice enhancements
+    'process_overdue_invoices': {
+        'task': 'finance.tasks.process_overdue_invoices',
+        'schedule': crontab(hour=1, minute=0),  # Run daily at 1 AM
+        'args': ()
+    },
+    'send_payment_reminders': {
+        'task': 'finance.tasks.send_payment_reminders',
+        'schedule': crontab(hour=9, minute=0),  # Run daily at 9 AM (business hours)
+        'args': ()
     }
 }

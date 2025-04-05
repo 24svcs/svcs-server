@@ -1,6 +1,8 @@
 from rest_framework.viewsets import ModelViewSet, GenericViewSet
 from rest_framework.mixins import CreateModelMixin, DestroyModelMixin
 import logging
+from decimal import Decimal, DecimalException, InvalidOperation
+from django.core.exceptions import ValidationError, DecimalValidator
 
 from .serializers import (
     Client, ClientSerializer, CreateClientSerializer,
@@ -698,7 +700,15 @@ class PublicInvoicePaymentView(APIView):
                 'due_date': invoice.due_date,
                 'pending_payments': pending_payments,
                 'can_pay': (invoice.status in ['PENDING', 'OVERDUE', 'PARTIALLY_PAID'] 
-                            and available_to_pay > 0)
+                            and available_to_pay > 0),
+                # Add new fields
+                'days_overdue': invoice.days_overdue,
+                'late_fee_percentage': invoice.late_fee_percentage,
+                'late_fee_amount': invoice.late_fee_amount,
+                'total_with_late_fees': invoice.total_with_late_fees,
+                'allow_partial_payments': invoice.allow_partial_payments,
+                'minimum_payment_amount': invoice.minimum_payment_amount,
+                'payment_progress_percentage': invoice.payment_progress_percentage
             }
             
             return Response(data)
@@ -748,16 +758,49 @@ class PublicInvoicePaymentView(APIView):
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
+            # Get requested payment amount from request, default to full available amount
+            requested_amount = request.data.get('amount', available_to_pay)
+            
+            # Validate payment amount
+            try:
+                requested_amount = Decimal(str(requested_amount))
+                
+                # Check for partial payment restrictions
+                if requested_amount < available_to_pay:  # This would be a partial payment
+                    if not invoice.allow_partial_payments:
+                        return Response(
+                            {"detail": f"This invoice does not allow partial payments. Payment amount must be {available_to_pay}."},
+                            status=status.HTTP_400_BAD_REQUEST
+                        )
+                    
+                    # Check minimum payment amount
+                    if requested_amount < invoice.minimum_payment_amount:
+                        return Response(
+                            {"detail": f"Payment amount must be at least {invoice.minimum_payment_amount} for partial payments."},
+                            status=status.HTTP_400_BAD_REQUEST
+                        )
+                
+                # Ensure payment doesn't exceed available amount
+                if requested_amount > available_to_pay:
+                    requested_amount = available_to_pay
+                
+            except (ValueError, TypeError, DecimalException):
+                return Response(
+                    {"detail": "Invalid payment amount"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
             # Create payment intent for the available amount
             payment_data = StripeService.create_payment_intent(
                 invoice,
                 return_url=request.data.get('return_url'),
-                amount=available_to_pay
+                amount=requested_amount
             )
             
             return Response({
                 "client_secret": payment_data['client_secret'],
                 "payment_id": payment_data['payment_id'],
+                "amount": requested_amount, 
                 "available_to_pay": available_to_pay,
                 "invoice_number": invoice.invoice_number,
                 "publishable_key": os.environ.get('STRIPE_PUBLISHABLE_KEY')
@@ -769,7 +812,6 @@ class PublicInvoicePaymentView(APIView):
                 status=status.HTTP_404_NOT_FOUND
             )
         except Exception as e:
-            logger = logging.getLogger(__name__)
             logger.error(f"Error creating public payment intent: {str(e)}")
             return Response(
                 {"detail": f"Error creating payment: {str(e)}"},

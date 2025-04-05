@@ -8,6 +8,7 @@ from phonenumber_field.modelfields import PhoneNumberField
 from django_countries.fields import CountryField
 import logging
 from django.db.models import Sum
+from django.core.exceptions import ValidationError
 
 class Address(models.Model):
     """
@@ -100,6 +101,31 @@ class Invoice(models.Model):
     notes = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+    late_fee_percentage = models.DecimalField(
+        max_digits=5, decimal_places=2,
+        default=Decimal('0.00'), 
+        help_text="Late fee percentage to apply on overdue invoices"
+    )
+    late_fee_applied = models.BooleanField(
+        default=False,
+        help_text="Whether late fee has been applied"
+    )
+    last_reminder_date = models.DateField(
+        null=True, blank=True,
+        help_text="Date when the last reminder was sent"
+    )
+    payment_reminders_sent = models.PositiveIntegerField(
+        default=0, help_text="Number of payment reminders sent"
+        )
+    minimum_payment_amount = models.DecimalField(
+        max_digits=10, decimal_places=2,
+        default=Decimal('0.00'),
+        help_text="Minimum payment amount if partial payments are allowed"
+    )
+    allow_partial_payments = models.BooleanField(
+        default=False,
+        help_text="Whether partial payments are allowed"
+    )
 
     def __str__(self):
         return f"Invoice {self.invoice_number} - {self.client.name}"
@@ -196,6 +222,10 @@ class Invoice(models.Model):
             self.status = 'PARTIALLY_PAID'
         elif self.due_date < timezone.now().date():
             self.status = 'OVERDUE'
+            
+            # Check if we should apply late fee when status changes to OVERDUE
+            if old_status != 'OVERDUE' and not self.late_fee_applied and self.late_fee_percentage > 0:
+                self.apply_late_fee()
         else:
             self.status = 'PENDING'
             
@@ -204,7 +234,69 @@ class Invoice(models.Model):
             logger.info(f"Changing invoice {self.invoice_number} status from {old_status} to {self.status}")
             self.save(update_fields=['status'])
     
+    def clean(self):
+        """Validate model fields."""
+        super().clean()
+        
+        # If allow_partial_payments is True, minimum_payment_amount must be set
+        if self.allow_partial_payments and self.minimum_payment_amount <= 0:
+            raise ValidationError({
+                'minimum_payment_amount': 'Minimum payment amount must be greater than 0 when partial payments are allowed.'
+            })
+            
+        # If minimum_payment_amount is set but allow_partial_payments is False, warn about inconsistency
+        if not self.allow_partial_payments and self.minimum_payment_amount > 0:
+            raise ValidationError({
+                'minimum_payment_amount': 'Minimum payment amount should be 0 when partial payments are not allowed.'
+            })
+            
+        # Ensure due date is after issue date
+        if self.due_date and self.issue_date and self.due_date < self.issue_date:
+            raise ValidationError({
+                'due_date': 'Due date cannot be before the issue date.'
+            })
     
+    def save(self, *args, **kwargs):
+        """Override save to ensure validations are run."""
+        self.clean()
+        super().save(*args, **kwargs)
+    
+    @property
+    def late_fee_amount(self):
+        """Calculate the late fee for this invoice if it's overdue."""
+        if self.status != 'OVERDUE' or self.late_fee_percentage <= 0:
+            return Decimal('0.00')
+        return (self.due_balance * self.late_fee_percentage / 100).quantize(Decimal('0.01'))
+    
+    @property
+    def total_with_late_fees(self):
+        """Calculate the total amount including any late fees."""
+        return self.total_amount + self.late_fee_amount
+    
+    @property
+    def payment_progress_percentage(self):
+        """Calculate the payment progress as a percentage."""
+        if self.total_amount <= 0:
+            return 100
+        return min(100, int((self.paid_amount / self.total_amount) * 100))
+    
+    def apply_late_fee(self):
+        """Apply late fee to the invoice if it's overdue and fee hasn't been applied yet."""
+        if self.status == 'OVERDUE' and not self.late_fee_applied and self.late_fee_percentage > 0:
+            late_fee = self.late_fee_amount
+            if late_fee > 0:
+                InvoiceItem.objects.create(
+                    invoice=self,
+                    product="Late Payment Fee",
+                    description=f"Late payment fee ({self.late_fee_percentage}%) applied on {timezone.now().date()}",
+                    quantity=Decimal('1.00'),
+                    unit_price=late_fee
+                )
+                
+                self.late_fee_applied = True
+                self.save(update_fields=['late_fee_applied'])
+                return True
+        return False
 
 class InvoiceItem(models.Model):
     """
@@ -270,9 +362,30 @@ class Payment(models.Model):
     def __str__(self):
         return f"Payment {self.id} for Invoice {self.invoice.invoice_number}"
     
+    def clean(self):
+        """Validate payment data."""
+        super().clean()
+        
+        # Check for zero amount
+        if self.amount <= 0:
+            raise ValidationError({
+                'amount': 'Payment amount must be greater than zero.'
+            })
+        
+        # Check if invoice is already paid
+        if self.invoice_id and not self.pk:  # Only check on new payments
+            invoice = Invoice.objects.get(pk=self.invoice_id)
+            if invoice.status == 'PAID':
+                raise ValidationError({
+                    'invoice': 'Cannot add payment to an invoice that is already paid.'
+                })
+    
     def save(self, *args, **kwargs):
         """Override save to trigger invoice status update."""
         logger = logging.getLogger(__name__)
+        
+        # Run validations
+        self.clean()
         
         is_new = not self.pk
         is_status_update = False
