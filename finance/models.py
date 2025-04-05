@@ -4,6 +4,8 @@ from decimal import Decimal
 from organization.models import Organization
 from django.utils import timezone
 import uuid
+from phonenumber_field.modelfields import PhoneNumberField
+from django_countries.fields import CountryField
 
 class Address(models.Model):
     """
@@ -13,8 +15,9 @@ class Address(models.Model):
     street = models.CharField(max_length=255)
     city = models.CharField(max_length=100)
     state = models.CharField(max_length=50)
-    zip_code = models.CharField(max_length=10)
-    country = models.CharField(max_length=100, default='United States')
+    zip_code = models.CharField(max_length=10) 
+    country = CountryField()
+    client = models.ForeignKey('Client', on_delete=models.CASCADE, related_name='addresses')
     
     def __str__(self):
         return f"{self.street}, {self.city}, {self.state} {self.zip_code}"
@@ -28,16 +31,17 @@ class Client(models.Model):
     organization = models.ForeignKey(Organization, models.CASCADE, related_name='clients')
     name = models.CharField(max_length=200)
     email = models.EmailField(null=True, blank=True)
-    phone = models.CharField(unique=True)
-    address = models.ForeignKey(Address, on_delete=models.PROTECT, related_name='clients', null=True)
+    phone = PhoneNumberField(unique=True)
     company_name = models.CharField(max_length=200, blank=True)
     tax_number = models.CharField(max_length=50, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     is_active = models.BooleanField(default=True)
+    stripe_customer_id = models.CharField(max_length=100, blank=True, null=True)
 
     def __str__(self):
         return self.name
+    
     
     @property
     def total_paid(self):

@@ -1,6 +1,5 @@
 from django.urls import path, include
 from rest_framework_nested import routers
-from rest_framework_nested.routers import NestedSimpleRouter
 from core.views import LanguageViewSet, UserViewSet, UserInvitationViewSet
 from organization.views import OrganizationViewSet, MemberViewSet, InvitationViewSet
 from human_resources.views import (
@@ -16,10 +15,20 @@ from finance.views import (
     PaymentViewSet,
     MakeInvoicePaymentViewSet,
     BulkInvoiceItemViewSet,
-    RecurringInvoiceViewSet
+    RecurringInvoiceViewSet,
+    ClientAddressViewSet,
+    StripePaymentViewSet,
+    StripeWebhookView
 )
 
-from api.views import notify_customers_view, refine_attendance_records_view, generate_attendance_reports_view
+from api.views import (
+    notify_customers_view, 
+    refine_attendance_records_view, 
+    generate_attendance_reports_view, 
+    send_email, 
+    send_invite_email,
+    buy
+)
 
 # Main router for non-nested routes
 router = routers.DefaultRouter()
@@ -62,12 +71,20 @@ invoice_router.register('invoices', InvoiceViewSet, basename='invoice')
 payment_router = routers.NestedDefaultRouter(router, r'organizations', lookup='organization')
 payment_router.register('payments', PaymentViewSet, basename='payment')
 
+# Stripe payments router
+stripe_payment_router = routers.NestedDefaultRouter(router, r'organizations', lookup='organization')
+stripe_payment_router.register('stripe-payments', StripePaymentViewSet, basename='stripe-payment')
+
 # New router for bulk invoice items, nested under both organization and invoice
 bulk_items_router = routers.NestedSimpleRouter(invoice_router, r'invoices', lookup='invoice')
 bulk_items_router.register(r'bulk-items', BulkInvoiceItemViewSet, basename='bulk-invoice-items')
 
 recurring_invoice_router = routers.NestedDefaultRouter(router, r'organizations', lookup='organization')
 recurring_invoice_router.register('recurring-invoices', RecurringInvoiceViewSet, basename='recurring-invoice')
+
+client_address_router = routers.NestedDefaultRouter(client_router, r'clients', lookup='client')
+client_address_router.register('addresses', ClientAddressViewSet, basename='client-address')
+
 
 urlpatterns = [
     path(r'', include(router.urls)),
@@ -82,9 +99,15 @@ urlpatterns = [
     path(r'', include(client_router.urls)),
     path(r'', include(invoice_router.urls)),
     path(r'', include(payment_router.urls)),
+    path(r'', include(stripe_payment_router.urls)),
     path(r'', include(bulk_items_router.urls)),
     path(r'', include(recurring_invoice_router.urls)),
+    path(r'', include(client_address_router.urls)),
     path(r'notify-customers/', notify_customers_view, name='notify-customers'),
     path(r'refine-attendance-records/', refine_attendance_records_view, name='refine-attendance-records'),
     path(r'generate-attendance-reports/', generate_attendance_reports_view, name='generate-attendance-reports'),
+    path(r'send-email/', send_email, name='send-email'),
+    path(r'send-invite-email/', send_invite_email, name='send-invite-email'),
+    path(r'buy/', buy, name='buy'),
+    path(r'stripe-webhook/', StripeWebhookView.as_view(), name='stripe-webhook'),
 ]

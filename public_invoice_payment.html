@@ -1,0 +1,445 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0"
+    />
+    <title>Pay Invoice</title>
+    <style>
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+          Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+        line-height: 1.6;
+        color: #333;
+        max-width: 800px;
+        margin: 0 auto;
+        padding: 20px;
+      }
+      .container {
+        background-color: #f8f9fa;
+        border-radius: 8px;
+        padding: 30px;
+        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05);
+      }
+      h1 {
+        margin-top: 0;
+        color: #444;
+      }
+      .invoice-details {
+        background-color: #fff;
+        border-radius: 6px;
+        padding: 20px;
+        margin-bottom: 30px;
+        border: 1px solid #eee;
+      }
+      .payment-form {
+        background-color: #fff;
+        border-radius: 6px;
+        padding: 20px;
+        border: 1px solid #eee;
+      }
+      button {
+        background-color: #4caf50;
+        color: white;
+        border: none;
+        padding: 10px 20px;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 16px;
+        margin-top: 20px;
+      }
+      button:hover {
+        background-color: #45a049;
+      }
+      button:disabled {
+        background-color: #cccccc;
+        cursor: not-allowed;
+      }
+      .field {
+        margin-bottom: 15px;
+      }
+      .field-label {
+        font-weight: bold;
+        margin-bottom: 5px;
+        display: block;
+      }
+      .amount {
+        font-size: 24px;
+        font-weight: bold;
+        color: #28a745;
+      }
+      .status {
+        display: inline-block;
+        padding: 3px 10px;
+        border-radius: 12px;
+        font-size: 14px;
+        font-weight: 500;
+      }
+      .status.pending {
+        background-color: #ffeeba;
+        color: #856404;
+      }
+      .status.overdue {
+        background-color: #f8d7da;
+        color: #721c24;
+      }
+      .status.partially-paid {
+        background-color: #d1ecf1;
+        color: #0c5460;
+      }
+      .error {
+        color: #dc3545;
+        margin-top: 10px;
+      }
+      .success {
+        color: #28a745;
+        margin-top: 10px;
+      }
+      .card-element {
+        border: 1px solid #ddd;
+        border-radius: 4px;
+        padding: 10px;
+        margin-top: 10px;
+      }
+      #card-errors {
+        color: #dc3545;
+        margin-top: 5px;
+        font-size: 14px;
+      }
+      .spinner {
+        display: inline-block;
+        width: 20px;
+        height: 20px;
+        border: 3px solid rgba(255, 255, 255, 0.3);
+        border-radius: 50%;
+        border-top-color: #fff;
+        animation: spin 1s ease-in-out infinite;
+        margin-right: 10px;
+        vertical-align: middle;
+      }
+      @keyframes spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      .hidden {
+        display: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>Invoice Payment</h1>
+
+      <div id="loading">Loading invoice details...</div>
+
+      <div
+        id="invoice-container"
+        class="hidden"
+      >
+        <div class="invoice-details">
+          <div class="field">
+            <div class="field-label">Invoice Number</div>
+            <div id="invoice-number"></div>
+          </div>
+
+          <div class="field">
+            <div class="field-label">Customer</div>
+            <div id="client-name"></div>
+          </div>
+
+          <div class="field">
+            <div class="field-label">Due Date</div>
+            <div id="due-date"></div>
+          </div>
+
+          <div class="field">
+            <div class="field-label">Status</div>
+            <div id="status-container"></div>
+          </div>
+
+          <div class="field">
+            <div class="field-label">Amount Due</div>
+            <div
+              class="amount"
+              id="amount"
+            ></div>
+          </div>
+        </div>
+
+        <div
+          id="payment-eligible"
+          class="hidden"
+        >
+          <div class="payment-form">
+            <h2>Payment Details</h2>
+            <p>Please enter your payment information below.</p>
+
+            <form id="payment-form">
+              <div class="field">
+                <label
+                  for="card-element"
+                  class="field-label"
+                  >Credit or debit card</label
+                >
+                <div
+                  id="card-element"
+                  class="card-element"
+                ></div>
+                <div
+                  id="card-errors"
+                  role="alert"
+                ></div>
+              </div>
+
+              <button
+                type="submit"
+                id="submit-button"
+              >
+                <span id="button-text">Pay Now</span>
+                <span
+                  id="spinner"
+                  class="spinner hidden"
+                ></span>
+              </button>
+            </form>
+
+            <div
+              id="payment-result"
+              class="hidden"
+            ></div>
+          </div>
+        </div>
+
+        <div
+          id="payment-not-eligible"
+          class="hidden"
+        >
+          <p>This invoice is not eligible for online payment at this time.</p>
+          <p>
+            Please contact the sender for assistance or alternative payment
+            methods.
+          </p>
+        </div>
+      </div>
+
+      <div
+        id="error-container"
+        class="error hidden"
+      ></div>
+    </div>
+
+    <script src="https://js.stripe.com/v3/"></script>
+    <script>
+      // Get invoice UUID from the URL
+      const invoiceUuid = window.location.pathname.split('/').pop();
+
+      // Base URL for API
+      const baseUrl = window.location.origin;
+
+      // Elements we'll use
+      const loadingElement = document.getElementById('loading');
+      const invoiceContainer = document.getElementById('invoice-container');
+      const errorContainer = document.getElementById('error-container');
+      const paymentEligibleElement =
+        document.getElementById('payment-eligible');
+      const paymentNotEligibleElement = document.getElementById(
+        'payment-not-eligible'
+      );
+      const paymentForm = document.getElementById('payment-form');
+      const submitButton = document.getElementById('submit-button');
+      const paymentResult = document.getElementById('payment-result');
+
+      // Stripe variables
+      let stripe;
+      let elements;
+      let cardElement;
+      let clientSecret;
+      let publishableKey;
+
+      // Function to format currency
+      function formatCurrency(amount) {
+        return new Intl.NumberFormat('en-US', {
+          style: 'currency',
+          currency: 'USD',
+        }).format(amount);
+      }
+
+      // Function to format dates
+      function formatDate(dateString) {
+        const options = { year: 'numeric', month: 'long', day: 'numeric' };
+        return new Date(dateString).toLocaleDateString('en-US', options);
+      }
+
+      // Function to get status class
+      function getStatusClass(status) {
+        switch (status.toLowerCase()) {
+          case 'pending':
+            return 'pending';
+          case 'overdue':
+            return 'overdue';
+          case 'partially_paid':
+            return 'partially-paid';
+          default:
+            return '';
+        }
+      }
+
+      // Function to show error
+      function showError(message) {
+        loadingElement.classList.add('hidden');
+        errorContainer.textContent = message;
+        errorContainer.classList.remove('hidden');
+      }
+
+      // Function to load invoice details
+      async function loadInvoiceDetails() {
+        try {
+          const response = await fetch(
+            `${baseUrl}/pay-invoice/${invoiceUuid}/`
+          );
+
+          if (!response.ok) {
+            throw new Error('Failed to load invoice details');
+          }
+
+          const data = await response.json();
+
+          // Fill invoice details
+          document.getElementById('invoice-number').textContent =
+            data.invoice_number;
+          document.getElementById('client-name').textContent = data.client_name;
+          document.getElementById('due-date').textContent = formatDate(
+            data.due_date
+          );
+          document.getElementById('amount').textContent = formatCurrency(
+            data.amount
+          );
+
+          const statusContainer = document.getElementById('status-container');
+          statusContainer.innerHTML = `<span class="status ${getStatusClass(
+            data.status
+          )}">${data.status}</span>`;
+
+          // Show/hide payment form based on eligibility
+          if (data.can_pay) {
+            paymentEligibleElement.classList.remove('hidden');
+            setupStripeElements();
+          } else {
+            paymentNotEligibleElement.classList.remove('hidden');
+          }
+
+          // Show invoice container, hide loading
+          loadingElement.classList.add('hidden');
+          invoiceContainer.classList.remove('hidden');
+        } catch (error) {
+          showError(`Error loading invoice: ${error.message}`);
+        }
+      }
+
+      // Function to set up Stripe Elements
+      async function setupStripeElements() {
+        try {
+          // Get payment intent from server
+          const response = await fetch(
+            `${baseUrl}/pay-invoice/${invoiceUuid}/`,
+            {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({
+                return_url: window.location.href,
+              }),
+            }
+          );
+
+          if (!response.ok) {
+            throw new Error('Failed to create payment intent');
+          }
+
+          const data = await response.json();
+
+          // Initialize Stripe
+          publishableKey = data.publishable_key;
+          clientSecret = data.client_secret;
+
+          stripe = Stripe(publishableKey);
+          elements = stripe.elements();
+
+          // Create card element
+          cardElement = elements.create('card');
+          cardElement.mount('#card-element');
+
+          // Handle card errors
+          cardElement.on('change', (event) => {
+            const displayError = document.getElementById('card-errors');
+            if (event.error) {
+              displayError.textContent = event.error.message;
+            } else {
+              displayError.textContent = '';
+            }
+          });
+
+          // Enable form
+          paymentForm.addEventListener('submit', handleSubmit);
+        } catch (error) {
+          showError(`Error setting up payment: ${error.message}`);
+        }
+      }
+
+      // Function to handle form submission
+      async function handleSubmit(event) {
+        event.preventDefault();
+
+        if (!stripe || !elements) {
+          return;
+        }
+
+        // Disable button and show spinner
+        submitButton.disabled = true;
+        document.getElementById('spinner').classList.remove('hidden');
+        document.getElementById('button-text').textContent = 'Processing...';
+
+        try {
+          const { error, paymentIntent } = await stripe.confirmCardPayment(
+            clientSecret,
+            {
+              payment_method: {
+                card: cardElement,
+                billing_details: {
+                  name: document.getElementById('client-name').textContent,
+                },
+              },
+            }
+          );
+
+          if (error) {
+            // Show error
+            document.getElementById('card-errors').textContent = error.message;
+          } else if (paymentIntent.status === 'succeeded') {
+            // Show success
+            paymentForm.classList.add('hidden');
+            paymentResult.textContent = 'Payment successful! Thank you.';
+            paymentResult.classList.add('success');
+            paymentResult.classList.remove('hidden');
+          }
+        } catch (error) {
+          document.getElementById(
+            'card-errors'
+          ).textContent = `Payment failed: ${error.message}`;
+        }
+
+        // Re-enable button and hide spinner
+        submitButton.disabled = false;
+        document.getElementById('spinner').classList.add('hidden');
+        document.getElementById('button-text').textContent = 'Pay Now';
+      }
+
+      // Load invoice details when page loads
+      document.addEventListener('DOMContentLoaded', loadInvoiceDetails);
+    </script>
+  </body>
+</html>

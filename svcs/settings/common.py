@@ -21,7 +21,9 @@ INSTALLED_APPS = [
     'api',
     'organization',
     'human_resources',
-    'finance'
+    'finance',
+    'django_moncash',
+    'django_countries'
 ]
 
 MIDDLEWARE = [
@@ -110,11 +112,6 @@ STATIC_ROOT = os.path.join(BASE_DIR, 'static')
 MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
 
 
-EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
-RESEND_SMTP_PORT = 587
-RESEND_SMTP_USERNAME = 'resend'
-RESEND_SMTP_HOST = 'smtp.resend.com' 
-RESEND_API_KEY = config('RESEND_API_KEY')
 
 CLERK_FRONTEND_API_URL = config('CLERK_FRONTEND_API_URL')
 CLERK_SECRET_KEY = config('CLERK_SECRET_KEY')
@@ -131,6 +128,19 @@ CSRF_COOKIE_SECURE = True
 CELERY_BROKER_URL = config('CELERY_BROKER_URL')
 CELERY_RESULT_BACKEND = config('CELERY_RESULT_BACKEND')
 
+
+EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
+RESEND_SMTP_PORT = 587
+RESEND_SMTP_USERNAME = 'resend'
+RESEND_SMTP_HOST = 'smtp.resend.com'
+RESEND_API_KEY = config('RESEND_API_KEY')
+
+
+MONCASH = {
+        'CLIENT_ID':'YOUR_CLIENT_ID',
+        'SECRET_KEY':'YOUR_SECRET_KEY',
+        'ENVIRONMENT':'sandbox or production'
+    }
 
 CELERY_BEAT_SCHEDULE = {
     'generate_attendance_reports': {

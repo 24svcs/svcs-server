@@ -1,0 +1,261 @@
+import stripe
+import logging
+import os
+from django.conf import settings
+from django.urls import reverse
+from django.utils import timezone
+from .models import Invoice, Payment, Client
+from decimal import Decimal
+
+logger = logging.getLogger(__name__)
+
+# Initialize Stripe with the API key from environment variables
+stripe.api_key = os.environ.get('STRIPE_GLOBAL_API_KEY')
+STRIPE_WEBHOOK_SECRET = os.environ.get('STRIPE_WEBHOOK_SECRET')
+
+class StripeService:
+    """
+    Service class for handling Stripe payment integrations.
+    """
+    
+    @staticmethod
+    def create_stripe_customer(client):
+        """
+        Create a Stripe customer for a client if they don't have one already.
+        
+        Args:
+            client (Client): The client model to create a Stripe customer for
+            
+        Returns:
+            str: The Stripe customer ID
+        """
+        try:
+            # Try to find if customer exists in Stripe by metadata
+            existing_customers = stripe.Customer.list(
+                email=client.email,
+                limit=1
+            )
+            
+            if existing_customers and existing_customers.data:
+                # Customer exists in Stripe
+                return existing_customers.data[0].id
+            
+            # Create customer in Stripe
+            customer_data = {
+                'name': client.name,
+                'email': client.email,
+                'phone': str(client.phone) if client.phone else None,
+                'metadata': {
+                    'client_id': client.id,
+                    'organization_id': client.organization_id
+                }
+            }
+            
+            if client.company_name:
+                customer_data['description'] = f"Company: {client.company_name}"
+            
+            stripe_customer = stripe.Customer.create(**customer_data)
+            
+            return stripe_customer.id
+            
+        except Exception as e:
+            logger.error(f"Error creating Stripe customer: {str(e)}")
+            raise
+    
+    @staticmethod
+    def create_payment_intent(invoice, return_url=None, payment_method_types=None):
+        """
+        Create a payment intent for an invoice.
+        
+        Args:
+            invoice (Invoice): The invoice to create a payment intent for
+            return_url (str, optional): URL to redirect after payment
+            payment_method_types (list, optional): List of payment method types to accept
+            
+        Returns:
+            dict: The payment intent object
+        """
+        try:
+            # Get or create Stripe customer
+            client = invoice.client
+            customer_id = StripeService.create_stripe_customer(client)
+            
+            if not payment_method_types:
+                payment_method_types = ['card']
+            
+            # Calculate amount in cents (Stripe uses smallest currency unit)
+            # For USD, that's cents, so we multiply by 100
+            amount_in_cents = int(invoice.due_balance * 100)
+            
+            # Create payment intent
+            intent = stripe.PaymentIntent.create(
+                amount=amount_in_cents,
+                currency='usd',  # Replace with your currency
+                customer=customer_id,
+                payment_method_types=payment_method_types,
+                description=f"Payment for Invoice #{invoice.invoice_number}",
+                metadata={
+                    'invoice_id': invoice.id,
+                    'invoice_number': invoice.invoice_number,
+                    'client_id': client.id,
+                    'organization_id': invoice.organization_id
+                }
+            )
+            
+            # Create a pending payment record
+            payment = Payment.objects.create(
+                organization_id=invoice.organization_id,
+                client=client,
+                invoice=invoice,
+                amount=invoice.due_balance,
+                payment_date=timezone.now().date(),  # Set current date instead of None
+                payment_method='CREDIT_CARD',
+                status='PENDING',
+                transaction_id=intent.id,
+                notes=f"Stripe payment intent: {intent.id}"
+            )
+            
+            return {
+                'payment_intent': intent,
+                'client_secret': intent.client_secret,
+                'payment_id': payment.id
+            }
+            
+        except Exception as e:
+            logger.error(f"Error creating payment intent: {str(e)}")
+            raise
+    
+    @staticmethod
+    def handle_payment_webhook(payload, signature):
+        """
+        Handle Stripe webhook events for payment updates.
+        
+        Args:
+            payload (bytes): The raw webhook payload
+            signature (str): The Stripe signature header
+            
+        Returns:
+            dict: A response with details of the handled event
+        """
+        try:
+            event = stripe.Webhook.construct_event(
+                payload, signature, STRIPE_WEBHOOK_SECRET
+            )
+            
+            # Handle different event types
+            if event['type'] == 'payment_intent.succeeded':
+                return StripeService._handle_payment_succeeded(event)
+            elif event['type'] == 'payment_intent.payment_failed':
+                return StripeService._handle_payment_failed(event)
+            elif event['type'] == 'charge.refunded':
+                return StripeService._handle_charge_refunded(event)
+            
+            return {'status': 'ignored', 'event_type': event['type']}
+            
+        except stripe.error.SignatureVerificationError:
+            logger.error("Invalid signature in Stripe webhook")
+            raise
+        except Exception as e:
+            logger.error(f"Error handling Stripe webhook: {str(e)}")
+            raise
+    
+    @staticmethod
+    def _handle_payment_succeeded(event):
+        """
+        Handle a payment_intent.succeeded event.
+        
+        Args:
+            event (dict): The Stripe event object
+            
+        Returns:
+            dict: Status and details of the handled event
+        """
+        payment_intent = event['data']['object']
+        transaction_id = payment_intent['id']
+        
+        try:
+            # Find the payment record
+            payment = Payment.objects.get(transaction_id=transaction_id)
+            
+            # Update payment status
+            payment.status = 'COMPLETED'
+            payment.payment_date = timezone.now().date()
+            payment.save()
+            
+            # This will trigger the invoice status update via the save method
+            
+            return {
+                'status': 'success',
+                'payment_id': payment.id,
+                'invoice_id': payment.invoice.id
+            }
+        except Payment.DoesNotExist:
+            logger.error(f"Payment not found for transaction ID: {transaction_id}")
+            return {'status': 'error', 'error': 'Payment not found'}
+    
+    @staticmethod
+    def _handle_payment_failed(event):
+        """
+        Handle a payment_intent.payment_failed event.
+        
+        Args:
+            event (dict): The Stripe event object
+            
+        Returns:
+            dict: Status and details of the handled event
+        """
+        payment_intent = event['data']['object']
+        transaction_id = payment_intent['id']
+        
+        try:
+            # Find the payment record
+            payment = Payment.objects.get(transaction_id=transaction_id)
+            
+            # Update payment status
+            payment.status = 'FAILED'
+            payment.notes += f"\nPayment failed: {payment_intent.get('last_payment_error', {}).get('message', 'Unknown error')}"
+            payment.save()
+            
+            return {
+                'status': 'failed',
+                'payment_id': payment.id,
+                'invoice_id': payment.invoice.id
+            }
+        except Payment.DoesNotExist:
+            logger.error(f"Payment not found for transaction ID: {transaction_id}")
+            return {'status': 'error', 'error': 'Payment not found'}
+    
+    @staticmethod
+    def _handle_charge_refunded(event):
+        """
+        Handle a charge.refunded event.
+        
+        Args:
+            event (dict): The Stripe event object
+            
+        Returns:
+            dict: Status and details of the handled event
+        """
+        charge = event['data']['object']
+        payment_intent_id = charge.get('payment_intent')
+        
+        if not payment_intent_id:
+            return {'status': 'ignored', 'reason': 'No payment intent ID'}
+        
+        try:
+            # Find the payment record
+            payment = Payment.objects.get(transaction_id=payment_intent_id)
+            
+            # Update payment status
+            payment.status = 'REFUNDED'
+            payment.notes += f"\nRefunded on {timezone.now().date()}"
+            payment.save()
+            
+            return {
+                'status': 'refunded',
+                'payment_id': payment.id,
+                'invoice_id': payment.invoice.id
+            }
+        except Payment.DoesNotExist:
+            logger.error(f"Payment not found for transaction ID: {payment_intent_id}")
+            return {'status': 'error', 'error': 'Payment not found'} 

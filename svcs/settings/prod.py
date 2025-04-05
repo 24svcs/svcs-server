@@ -28,8 +28,9 @@ DATABASES = {
 
 
 ALLOWED_HOSTS = [
-    'localhost:8000',
+    'localhost',
     '127.0.0.1',
+    'localhost:8000',
     '24svcs-server.up.railway.app',
     'http://127.0.0.1:8000/',
     'https://svcs-attendance-tracker.vercel.app',

@@ -2,12 +2,28 @@ from rest_framework import serializers
 from decimal import Decimal
 from django.utils import timezone
 from django.db import transaction
-from .models import Client, Invoice, InvoiceItem, Payment, RecurringInvoice, RecurringInvoiceItem
+from .models import Client, Invoice, InvoiceItem, Payment, RecurringInvoice, RecurringInvoiceItem, Address
 import uuid
 from decimal import DecimalException
 from api.libs import validate_phone
 from phonenumber_field.modelfields import PhoneNumberField
 from .utils import annotate_invoice_calculations
+from django_countries.fields import CountryField
+
+
+
+class ClientAddressSerializer(serializers.ModelSerializer):
+    country = CountryField()
+
+    
+    class Meta:
+        model = Address
+        fields = ['id', 'street', 'city', 'state', 'zip_code', 'country']
+        
+    def create(self, validated_data):
+        client_id = self.context['client_id']
+
+        return Address.objects.create(client_id=client_id, **validated_data)
 
 
 
@@ -33,8 +49,9 @@ class ClientSerializer(serializers.ModelSerializer):
         return obj.total_outstanding
     
     def get_address(self, obj):
-        if obj.address:
-            return f"{obj.address.street}, {obj.address.city}, {obj.address.state} {obj.address.zip_code}, {obj.address.country}"
+        address = obj.addresses.first()
+        if address:
+            return f"{address.street}, {address.city}, {address.state} {address.zip_code}, {address.country}"
         return None
 
 

@@ -1,5 +1,6 @@
 from rest_framework.viewsets import ModelViewSet, GenericViewSet
 from rest_framework.mixins import CreateModelMixin, DestroyModelMixin
+import logging
 
 from .serializers import (
     Client, ClientSerializer, CreateClientSerializer,
@@ -24,7 +25,9 @@ from rest_framework import filters
 from .utils import annotate_invoice_calculations, calculate_payment_statistics
 from api.throttling import BurstRateThrottle, SustainedRateThrottle
 import uuid
+from .serializers import ClientAddressSerializer, Address
 
+logger = logging.getLogger(__name__)
 
 
 class ClientModelViewset(ModelViewSet):
@@ -47,9 +50,12 @@ class ClientModelViewset(ModelViewSet):
         # Optimize payment queries 
         payment_queryset = Payment.objects.select_related('invoice')
         
-        return Client.objects.select_related('address').prefetch_related(
+        address_queryset = Address.objects.select_related('client') 
+        
+        return Client.objects.prefetch_related(
             Prefetch('invoices', queryset=invoice_queryset),
-            Prefetch('payments', queryset=payment_queryset)
+            Prefetch('payments', queryset=payment_queryset),
+            # Prefetch('addresses', queryset=address_queryset)
         ).filter(organization_id=self.kwargs['organization_pk'])
     
     serializer_class = ClientSerializer
@@ -94,7 +100,24 @@ class ClientModelViewset(ModelViewSet):
         serializer = self.get_serializer(queryset, many=True)
         return Response(serializer.data)
     
-
+    
+# ================================ Client Address Viewset ================================
+   
+class ClientAddressViewSet(ModelViewSet):
+    serializer_class = ClientAddressSerializer
+    permission_classes = [IsAuthenticated]
+    
+    def get_queryset(self):
+        return Address.objects.filter(client_id=self.kwargs['client_pk'])
+    
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context['client_id'] = self.kwargs['client_pk']
+        return context
+    
+    
+    
+    
 # ================================ Invoice Viewset ================================
 
 class InvoiceViewSet(ModelViewSet):
@@ -233,13 +256,6 @@ class InvoiceViewSet(ModelViewSet):
                 {"detail": f"Failed to send invoice: {str(e)}"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
-            
-            
-    
- 
-    
-    
-            
             
             
             
@@ -407,7 +423,211 @@ class MakeInvoicePaymentViewSet(GenericViewSet, CreateModelMixin):
             PaymentSerializer(payment).data,
             status=status.HTTP_201_CREATED
         )
+
+
+class StripePaymentViewSet(GenericViewSet):
+    """
+    ViewSet for processing payments through Stripe.
+    """
+    permission_classes = [IsAuthenticated]
     
+    @action(detail=False, methods=['post'], url_path=r'create-payment-intent/(?P<invoice_uuid>[^/.]+)')
+    def create_payment_intent(self, request, organization_pk=None, invoice_uuid=None):
+        """
+        Create a Stripe payment intent for an invoice.
+        
+        Returns a client secret to be used for Stripe checkout on the frontend.
+        """
+        from .stripe_service import StripeService
+        
+        try:
+            # Get invoice
+            invoice = Invoice.objects.get(
+                organization_id=organization_pk,
+                uuid=invoice_uuid
+            )
+            
+            # Check if invoice can accept payments
+            if invoice.status not in ['PENDING', 'OVERDUE', 'PARTIALLY_PAID']:
+                return Response(
+                    {"detail": f"Cannot create payment for invoice in {invoice.status} status"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Check if there's any balance due
+            if invoice.due_balance <= 0:
+                return Response(
+                    {"detail": "Invoice has no balance due"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Create payment intent
+            payment_data = StripeService.create_payment_intent(
+                invoice,
+                return_url=request.data.get('return_url')
+            )
+            
+            return Response({
+                "client_secret": payment_data['client_secret'],
+                "payment_id": payment_data['payment_id'],
+                "amount": invoice.due_balance,
+                "invoice_number": invoice.invoice_number
+            })
+            
+        except Invoice.DoesNotExist:
+            return Response(
+                {"detail": "Invoice not found"},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        except Exception as e:
+            return Response(
+                {"detail": f"Error creating payment intent: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+from rest_framework.views import APIView
+from django.http import HttpResponse
+from rest_framework.permissions import AllowAny
+
+
+class StripeWebhookView(APIView):
+    """
+    View for handling Stripe webhook events.
+    """
+    permission_classes = [AllowAny]  # Stripe needs to access this endpoint without authentication
+    
+    def post(self, request, *args, **kwargs):
+        from .stripe_service import StripeService, STRIPE_WEBHOOK_SECRET
+        
+        payload = request.body
+        sig_header = request.META.get('HTTP_STRIPE_SIGNATURE')
+        
+        if not sig_header:
+            return Response(
+                {"detail": "Missing Stripe signature header"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            # Process the webhook
+            result = StripeService.handle_payment_webhook(payload, sig_header)
+            
+            # Return a 200 response to acknowledge receipt of the event
+            return HttpResponse(status=200)
+            
+        except Exception as e:
+            logger = logging.getLogger(__name__)
+            logger.error(f"Error handling Stripe webhook: {str(e)}")
+            return HttpResponse(status=400)
+
+
+class PublicInvoicePaymentView(APIView):
+    """
+    Public API for processing invoice payments without authentication.
+    Requires a valid invoice UUID and a payment token.
+    """
+    permission_classes = [AllowAny]
+    
+    def get(self, request, invoice_uuid=None, format=None):
+        """
+        Get invoice details for a public payment page or serve the HTML template.
+        """
+        # If no invoice_uuid provided, serve the HTML template
+        if invoice_uuid is None:
+            from django.http import HttpResponse
+            from django.conf import settings
+            import os
+            
+            # Get the HTML template path
+            template_path = os.path.join(settings.BASE_DIR, 'static', 'templates', 'invoice_payment.html')
+            
+            try:
+                with open(template_path, 'r') as f:
+                    html_content = f.read()
+                return HttpResponse(html_content, content_type='text/html')
+            except FileNotFoundError:
+                return Response(
+                    {"detail": "Payment template not found"},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+        
+        # If invoice_uuid provided, return the invoice details
+        try:
+            # Find the invoice by its public UUID
+            invoice = Invoice.objects.select_related('client').get(uuid=invoice_uuid)
+            
+            # Only return minimal information needed for payment
+            data = {
+                'invoice_number': invoice.invoice_number,
+                'client_name': invoice.client.name,
+                'amount': invoice.due_balance,
+                'status': invoice.status,
+                'due_date': invoice.due_date,
+                'can_pay': invoice.status in ['PENDING', 'OVERDUE', 'PARTIALLY_PAID'] and invoice.due_balance > 0
+            }
+            
+            return Response(data)
+            
+        except Invoice.DoesNotExist:
+            return Response(
+                {"detail": "Invoice not found"},
+                status=status.HTTP_404_NOT_FOUND
+            )
+    
+    def post(self, request, invoice_uuid, format=None):
+        """
+        Create a payment intent for a public invoice payment.
+        """
+        from .stripe_service import StripeService
+        import os
+        
+        try:
+            # Find the invoice by its public UUID
+            invoice = Invoice.objects.select_related('client', 'organization').get(uuid=invoice_uuid)
+            
+            # Check if invoice can accept payments
+            if invoice.status not in ['PENDING', 'OVERDUE', 'PARTIALLY_PAID']:
+                return Response(
+                    {"detail": f"Cannot create payment for invoice in {invoice.status} status"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Check if there's any balance due
+            if invoice.due_balance <= 0:
+                return Response(
+                    {"detail": "Invoice has no balance due"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Create payment intent
+            payment_data = StripeService.create_payment_intent(
+                invoice,
+                return_url=request.data.get('return_url')
+            )
+            
+            return Response({
+                "client_secret": payment_data['client_secret'],
+                "payment_id": payment_data['payment_id'],
+                "amount": invoice.due_balance,
+                "invoice_number": invoice.invoice_number,
+                "publishable_key": os.environ.get('STRIPE_PUBLISHABLE_KEY')
+            })
+            
+        except Invoice.DoesNotExist:
+            return Response(
+                {"detail": "Invoice not found"},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        except Exception as e:
+            logger = logging.getLogger(__name__)
+            logger.error(f"Error creating public payment intent: {str(e)}")
+            return Response(
+                {"detail": f"Error creating payment: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
 # ================================ Bulk Invoice Item Operations ================================
 class BulkInvoiceItemViewSet(GenericViewSet, CreateModelMixin, DestroyModelMixin):
     """
@@ -591,3 +811,8 @@ class RecurringInvoiceViewSet(ModelViewSet):
         return invoice
     
    
+
+    
+    
+    
+    
