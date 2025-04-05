@@ -17,9 +17,6 @@ def validate_phone(value, default_region='IN'):
         if not is_valid_number(phone_number):
             raise serializers.ValidationError(_('Please enter a valid phone number.'))
         
-        # if len(str(phone_number.national_number)) != 10:
-        #     raise serializers.ValidationError(_('Phone number must be 10 digits long for this region.'))
-            
 
         return format_number(phone_number, PhoneNumberFormat.E164)
         

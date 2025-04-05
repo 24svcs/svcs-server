@@ -3,10 +3,13 @@ from django.core.validators import MinValueValidator
 from decimal import Decimal
 from organization.models import Organization
 from django.utils import timezone
-
-
+import uuid
 
 class Address(models.Model):
+    """
+    Address model for storing client location information.
+    Used by Client model as a foreign key.
+    """
     street = models.CharField(max_length=255)
     city = models.CharField(max_length=100)
     state = models.CharField(max_length=50)
@@ -15,13 +18,18 @@ class Address(models.Model):
     
     def __str__(self):
         return f"{self.street}, {self.city}, {self.state} {self.zip_code}"
+    
 
 class Client(models.Model):
-    organization = models.ForeignKey(Organization, models.CASCADE, related_name='clients_c')
+    """
+    Client model representing customers in the system.
+    Contains basic information and relationships to invoices and payments.
+    """
+    organization = models.ForeignKey(Organization, models.CASCADE, related_name='clients')
     name = models.CharField(max_length=200)
     email = models.EmailField(null=True, blank=True)
     phone = models.CharField(unique=True)
-    address = models.ForeignKey(Address, on_delete=models.PROTECT, related_name='address', null=True)
+    address = models.ForeignKey(Address, on_delete=models.PROTECT, related_name='clients', null=True)
     company_name = models.CharField(max_length=200, blank=True)
     tax_number = models.CharField(max_length=50, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -33,6 +41,10 @@ class Client(models.Model):
     
     @property
     def total_paid(self):
+        """
+        Calculate the total amount paid by this client across all invoices.
+        Optimized to use prefetched payments if available.
+        """
         # Use prefetched payments if available
         if hasattr(self, '_prefetched_objects_cache') and 'payments' in self._prefetched_objects_cache:
             return sum(payment.amount for payment in self._prefetched_objects_cache['payments'] 
@@ -41,6 +53,10 @@ class Client(models.Model):
     
     @property
     def total_outstanding(self):
+        """
+        Calculate the total outstanding balance for this client across all invoices.
+        Optimized to use prefetched invoices if available.
+        """
         # Use prefetched invoices if available
         if hasattr(self, '_prefetched_objects_cache') and 'invoices' in self._prefetched_objects_cache:
             total_invoice_amount = sum(invoice.total_amount for invoice in self._prefetched_objects_cache['invoices'])
@@ -53,10 +69,11 @@ class Client(models.Model):
         ordering = ['name', 'company_name']
 
 
-
-#TODO make the id a uuid field
 class Invoice(models.Model):
-    
+    """
+    Invoice model representing financial documents issued to clients.
+    Includes status tracking, payment linkage, and calculation properties.
+    """
     STATUS_CHOICES = [
         ('DRAFT', 'Draft'),
         ('PENDING', 'Pending'),
@@ -65,7 +82,9 @@ class Invoice(models.Model):
         ('CANCELLED', 'Cancelled'),
         ('PARTIALLY_PAID', 'Partially Paid'),
     ]
-    organization = models.ForeignKey(Organization, models.CASCADE, related_name='clients')
+    
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, unique=True)
+    organization = models.ForeignKey(Organization, models.CASCADE, related_name='invoices')
     client = models.ForeignKey(Client, on_delete=models.CASCADE, related_name='invoices')
     invoice_number = models.CharField(max_length=50, unique=True)
     issue_date = models.DateField()
@@ -81,6 +100,7 @@ class Invoice(models.Model):
     
     @property
     def tax_amount(self):
+        """Calculate the tax amount for this invoice based on item totals and tax rate."""
         # Using prefetched items if available
         if hasattr(self, '_prefetched_objects_cache') and 'items' in self._prefetched_objects_cache:
             items_total = sum(item.amount for item in self._prefetched_objects_cache['items'])
@@ -90,6 +110,7 @@ class Invoice(models.Model):
     
     @property
     def total_amount(self):
+        """Calculate the total invoice amount including tax."""
         # Using prefetched items if available
         if hasattr(self, '_prefetched_objects_cache') and 'items' in self._prefetched_objects_cache:
             items_total = sum(item.amount for item in self._prefetched_objects_cache['items'])
@@ -99,6 +120,7 @@ class Invoice(models.Model):
     
     @property
     def paid_amount(self):
+        """Calculate the amount paid toward this invoice so far."""
         # Use prefetched payments if available
         if hasattr(self, '_prefetched_objects_cache') and 'payments' in self._prefetched_objects_cache:
             return sum(payment.amount for payment in self._prefetched_objects_cache['payments'] 
@@ -107,25 +129,30 @@ class Invoice(models.Model):
     
     @property
     def due_balance(self):
+        """Calculate the remaining balance due on this invoice."""
         return self.total_amount - self.paid_amount
     
     @property
     def days_overdue(self):
+        """Calculate the number of days this invoice is overdue, if applicable."""
         if self.status == 'OVERDUE':
             return (timezone.now().date() - self.due_date).days
         return 0
     
     @property
     def pending_payments(self):
+        """Calculate the sum of pending payments for this invoice."""
         # Use prefetched payments if available
         if hasattr(self, '_prefetched_objects_cache') and 'payments' in self._prefetched_objects_cache:
             return sum(payment.amount for payment in self._prefetched_objects_cache['payments'] 
                       if payment.status == 'PENDING')
         return sum(payment.amount for payment in self.payments.filter(status='PENDING'))
     
-    
-            
     def update_status_based_on_payments(self):
+        """
+        Update the invoice status based on payment status and due date.
+        Called automatically when payments are created, updated, or deleted.
+        """
         # Don't change status for DRAFT or CANCELLED invoices
         if self.status in ['DRAFT', 'CANCELLED']:
             return
@@ -148,9 +175,13 @@ class Invoice(models.Model):
     
 
 class InvoiceItem(models.Model):
+    """
+    Line item within an invoice representing a product or service.
+    Contains quantity, pricing, and description information.
+    """
     invoice = models.ForeignKey(Invoice, on_delete=models.CASCADE, related_name='items')
     product = models.CharField(max_length=255)
-    description = models.CharField(max_length=255)
+    description = models.CharField(max_length=1000)  # Increased from 255
     quantity = models.DecimalField(
         max_digits=10, 
         decimal_places=2, 
@@ -167,10 +198,14 @@ class InvoiceItem(models.Model):
     
     @property
     def amount(self):
+        """Calculate the line item total (quantity * unit_price)."""
         return self.quantity * self.unit_price
 
 class Payment(models.Model):
-    organization = models.ForeignKey(Organization, models.CASCADE, related_name='clients_p')
+    """
+    Payment record associated with an invoice and client.
+    Tracks payment status, method, and related transaction details.
+    """
     PAYMENT_METHOD_CHOICES = [
         ('CASH', 'Cash'),
         ('BANK_TRANSFER', 'Bank Transfer'),
@@ -185,6 +220,7 @@ class Payment(models.Model):
         ('REFUNDED', 'Refunded'),
     ]
 
+    organization = models.ForeignKey(Organization, models.CASCADE, related_name='payments')
     client = models.ForeignKey(Client, on_delete=models.PROTECT, related_name='payments')
     invoice = models.ForeignKey(Invoice, on_delete=models.CASCADE, related_name='payments')
     amount = models.DecimalField(
@@ -202,7 +238,7 @@ class Payment(models.Model):
     def __str__(self):
         return f"Payment {self.id} for Invoice {self.invoice.invoice_number}"
     
-    
     def save(self, *args, **kwargs):
+        """Override save to trigger invoice status update."""
         super().save(*args, **kwargs)
         self.invoice.update_status_based_on_payments()

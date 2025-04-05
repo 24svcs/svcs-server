@@ -1,5 +1,6 @@
 from rest_framework.viewsets import ModelViewSet, GenericViewSet
 from rest_framework.mixins import CreateModelMixin
+
 from .serializers import (
     Client, ClientSerializer, CreateClientSerializer,
     Invoice, InvoiceSerializer, CreateInvoiceSerializer, UpdateInvoiceSerializer,
@@ -16,7 +17,8 @@ from django.utils import timezone
 from datetime import timedelta
 from rest_framework.decorators import action
 from rest_framework import status
-from rest_framework import  filters
+from rest_framework import filters
+from .utils import annotate_invoice_calculations, calculate_payment_statistics
 
 
 
@@ -92,25 +94,28 @@ class ClientModelViewset(ModelViewSet):
 
 class InvoiceViewSet(ModelViewSet):
     pagination_class = DefaultPagination
-    filter_backends = [DjangoFilterBackend, filters.SearchFilter]
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     search_fields = [
         'invoice_number__istartswith',
         'client__name__istartswith',
         'client__phone__exact',
         'client__company_name__istartswith',
     ]
+    ordering_fields = ['issue_date', 'due_date', 'created_at', 'status']
+    ordering = ['-created_at']  # Default ordering
     permission_classes = [IsAuthenticated]
     filterset_class = InvoiceFilter
     
     def get_queryset(self):
         from django.db.models import Prefetch
-        return Invoice.objects.select_related('client').prefetch_related(
-            'items',
-            Prefetch('payments', queryset=Payment.objects.all().select_related('invoice', 'client'))
+        # Use the utility function to annotate invoice calculations
+        return annotate_invoice_calculations(
+            Invoice.objects.select_related('client').prefetch_related(
+                'items',
+                Prefetch('payments', queryset=Payment.objects.all().select_related('invoice', 'client'))
+            )
         ).filter(organization_id=self.kwargs['organization_pk'])
   
-
-    
     def get_serializer_class(self):
         if self.action == 'create':
             return CreateInvoiceSerializer
@@ -123,7 +128,36 @@ class InvoiceViewSet(ModelViewSet):
         context['organization_id'] = self.kwargs['organization_pk']
         return context
     
-    
+    def list(self, request, *args, **kwargs):
+        queryset = self.filter_queryset(self.get_queryset())
+        page = self.paginate_queryset(queryset)
+        
+        if page is not None:
+            serializer = self.get_serializer(page, many=True)
+            response = self.get_paginated_response(serializer.data)
+            
+            # Calculate statistics
+            current_date = timezone.now().date()
+            thirty_days_ago = current_date - timedelta(days=30)
+            
+            stats = Invoice.objects.filter(
+                organization_id=self.kwargs['organization_pk']
+            ).aggregate(
+                total_invoices=Count('id'),
+                draft_invoices=Count('id', filter=Q(status='DRAFT')),
+                pending_invoices=Count('id', filter=Q(status='PENDING')),
+                paid_invoices=Count('id', filter=Q(status='PAID')),
+                overdue_invoices=Count('id', filter=Q(status='OVERDUE')),
+                partially_paid=Count('id', filter=Q(status='PARTIALLY_PAID')),
+                invoices_created_30d=Count('id', filter=Q(created_at__gte=thirty_days_ago)),
+                total_value=Sum('items__quantity', filter=Q(items__unit_price__gt=0), default=0)
+            )
+            
+            response.data['statistics'] = stats
+            return response
+        
+        serializer = self.get_serializer(queryset, many=True)
+        return Response(serializer.data)
     
     @action(detail=True, methods=['post'])
     def send_reminder(self, request, organization_pk=None, pk=None):
@@ -135,14 +169,26 @@ class InvoiceViewSet(ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # Here you would implement the actual reminder sending logic
-        # For now, we'll just return a success response
-        return Response(
-            {"detail": "Payment reminder sent successfully."},
-            status=status.HTTP_200_OK
-        )
+        if invoice.status not in ['PENDING', 'OVERDUE', 'PARTIALLY_PAID']:
+            return Response(
+                {"detail": f"Cannot send reminder for invoice in {invoice.status} status."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            # Here you would implement the actual reminder sending logic
+            # This is a placeholder for the actual implementation
+            
+            return Response(
+                {"detail": "Payment reminder sent successfully."},
+                status=status.HTTP_200_OK
+            )
+        except Exception as e:
+            return Response(
+                {"detail": f"Failed to send reminder: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
     
-
     @action(detail=True, methods=['post'])
     def send_to_client(self, request, organization_pk=None, pk=None):
         """
@@ -170,7 +216,6 @@ class InvoiceViewSet(ModelViewSet):
                 invoice.status = 'PENDING'
                 invoice.save()
             
-                
                 serializer = self.get_serializer(invoice)
                 return Response({
                     "detail": "Invoice has been sent to the client.",
@@ -197,6 +242,10 @@ class InvoiceViewSet(ModelViewSet):
 class PaymentViewSet(ModelViewSet):
     pagination_class = DefaultPagination
     permission_classes = [IsAuthenticated]
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    search_fields = ['invoice__invoice_number', 'client__name', 'transaction_id']
+    ordering_fields = ['payment_date', 'amount', 'status', 'created_at']
+    ordering = ['-created_at']  # Default ordering
     
     def get_queryset(self):
         return Payment.objects.select_related(
@@ -227,20 +276,9 @@ class PaymentViewSet(ModelViewSet):
             serializer = self.get_serializer(page, many=True)
             response = self.get_paginated_response(serializer.data)
             
-            # Calculate payment statistics
-            current_date = timezone.now()
-            thirty_days_ago = current_date - timedelta(days=30)
-            
-            stats = Payment.objects.filter(
-                client__organization_id=self.kwargs['organization_pk']
-            ).aggregate(
-                total_payments=Count('id'),
-                total_amount=Sum('amount', default=0),
-                completed_payments=Count('id', filter=Q(status='COMPLETED')),
-                pending_payments=Count('id', filter=Q(status='PENDING')),
-                failed_payments=Count('id', filter=Q(status='FAILED')),
-                payments_last_30d=Count('id', filter=Q(created_at__gte=thirty_days_ago)),
-                amount_last_30d=Sum('amount', filter=Q(created_at__gte=thirty_days_ago), default=0)
+            # Use utility function for payment statistics
+            stats = calculate_payment_statistics(
+                Payment.objects.filter(client__organization_id=self.kwargs['organization_pk'])
             )
             
             response.data['statistics'] = stats

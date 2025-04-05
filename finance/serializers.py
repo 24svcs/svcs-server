@@ -5,8 +5,10 @@ from django.db import transaction
 from .models import Client, Invoice, InvoiceItem, Payment
 import uuid
 from decimal import DecimalException
-from django.db.models import ExpressionWrapper, Sum, F, Value, Q, DecimalField
-from django.db.models.functions import Coalesce
+from api.libs import validate_phone
+from phonenumber_field.modelfields import PhoneNumberField
+from .utils import annotate_invoice_calculations
+
 
 
 class ClientSerializer(serializers.ModelSerializer):
@@ -35,17 +37,14 @@ class ClientSerializer(serializers.ModelSerializer):
         return None
 
 
-# ================================ Client Serializers ================================
+# <================================> Client Serializers <==========================================>
+
 class CreateClientSerializer(serializers.ModelSerializer):
+    phone  =  PhoneNumberField(validators=[validate_phone.validate_phone])
     class Meta:
         model = Client
         fields = ['name', 'email', 'phone', 'company_name', 'tax_number', 'is_active']
         
-    def validate_phone(self, value):
-        # Basic phone number validation
-        if not value.replace('+', '').replace('-', '').replace(' ', '').isdigit():
-            raise serializers.ValidationError("Phone number must contain only digits, spaces, hyphens, or plus sign")
-        return value
     
     def validate_email(self, value):
         if value and Client.objects.filter(email=value).exclude(id=self.instance.id if self.instance else None).exists():
@@ -127,30 +126,10 @@ class CreatePaymentSerializer(serializers.ModelSerializer):
     
     def validate_invoice_id(self, value):
         try:
-            invoice = Invoice.objects.annotate(
-                calculated_total=ExpressionWrapper(
-                    Coalesce(
-                        Sum(
-                            F('items__quantity') * F('items__unit_price'),
-                            output_field=DecimalField(max_digits=10, decimal_places=2)
-                        ),
-                        Value(0, output_field=DecimalField(max_digits=10, decimal_places=2))
-                    ) * (1 + F('tax_rate') / 100),
-                    output_field=DecimalField(max_digits=10, decimal_places=2)
-                ),
-                completed_payments_sum=Coalesce(
-                    Sum(
-                        'payments__amount',
-                        filter=Q(payments__status='COMPLETED'),
-                        output_field=DecimalField(max_digits=10, decimal_places=2)
-                    ),
-                    Value(0, output_field=DecimalField(max_digits=10, decimal_places=2))
-                ),
-                calculated_balance=ExpressionWrapper(
-                    F('calculated_total') - F('completed_payments_sum'),
-                    output_field=DecimalField(max_digits=10, decimal_places=2)
-                )
-            ).select_related('client').get(id=value)
+            # Use utility function for annotations
+            invoice = annotate_invoice_calculations(
+                Invoice.objects.select_related('client')
+            ).get(id=value)
             
             # Check if invoice can accept payments
             if invoice.status not in ['PENDING', 'OVERDUE', 'PARTIALLY_PAID']:
@@ -169,31 +148,10 @@ class CreatePaymentSerializer(serializers.ModelSerializer):
         return value
     
     def validate(self, data):
-        # Get invoice and validate payment amount
-        invoice = Invoice.objects.annotate(
-            calculated_total=ExpressionWrapper(
-                Coalesce(
-                    Sum(
-                        F('items__quantity') * F('items__unit_price'),
-                        output_field=DecimalField(max_digits=10, decimal_places=2)
-                    ),
-                    Value(0, output_field=DecimalField(max_digits=10, decimal_places=2))
-                ) * (1 + F('tax_rate') / 100),
-                output_field=DecimalField(max_digits=10, decimal_places=2)
-            ),
-            completed_payments_sum=Coalesce(
-                Sum(
-                    'payments__amount',
-                    filter=Q(payments__status='COMPLETED'),
-                    output_field=DecimalField(max_digits=10, decimal_places=2)
-                ),
-                Value(0, output_field=DecimalField(max_digits=10, decimal_places=2))
-            ),
-            calculated_balance=ExpressionWrapper(
-                F('calculated_total') - F('completed_payments_sum'),
-                output_field=DecimalField(max_digits=10, decimal_places=2)
-            )
-        ).get(id=data['invoice_id'])
+        # Get invoice and validate payment amount using utility function
+        invoice = annotate_invoice_calculations(
+            Invoice.objects.filter(id=data['invoice_id'])
+        ).get()
         
         # Check if payment amount exceeds remaining balance
         if data['amount'] > invoice.calculated_balance:
@@ -304,8 +262,9 @@ class CreateInvoiceItemSerializer(serializers.ModelSerializer):
             return value
         except (TypeError, ValueError, DecimalException):
             raise serializers.ValidationError("Invalid decimal value")
-
-# ================================ Invoice Serializers ================================
+        
+        
+# <>================================ Invoice Serializers =================================<>
 class CreateInvoiceSerializer(serializers.ModelSerializer):
     items = CreateInvoiceItemSerializer(many=True)
     client_id = serializers.IntegerField()
@@ -317,7 +276,7 @@ class CreateInvoiceSerializer(serializers.ModelSerializer):
             'notes', 'items'
         ]
     
-    def validate_client(self, value):
+    def validate_client_id(self, value):
         try:
             organization_id = self.context.get('organization_id')
             client = Client.objects.filter(
@@ -364,15 +323,13 @@ class CreateInvoiceSerializer(serializers.ModelSerializer):
         return data
     
     def generate_invoice_number(self):
-        # Generate a unique invoice number (you can customize this format)
-        prefix = timezone.now().strftime('%Y%m')
         random_suffix = str(uuid.uuid4().hex)[:6].upper()
-        invoice_number = f"INV-{prefix}-{random_suffix}"
+        invoice_number = f"INV-{random_suffix}"
         
         # Ensure uniqueness
         while Invoice.objects.filter(invoice_number=invoice_number).exists():
             random_suffix = str(uuid.uuid4().hex)[:6].upper()
-            invoice_number = f"INV-{prefix}-{random_suffix}"
+            invoice_number = f"INV-{random_suffix}"
         
         return invoice_number
     
@@ -397,6 +354,7 @@ class CreateInvoiceSerializer(serializers.ModelSerializer):
             InvoiceItem.objects.create(invoice=invoice, **item_data)
         
         return invoice
+
 
 
 
@@ -473,6 +431,8 @@ class UpdateInvoiceSerializer(serializers.ModelSerializer):
         instance.save()
         return instance
         
+
+
 
 class UpdatePaymentSerializer(serializers.ModelSerializer):
     class Meta:
