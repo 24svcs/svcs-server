@@ -194,12 +194,17 @@ class CreatePaymentSerializer(serializers.ModelSerializer):
         invoice_id = validated_data.pop('invoice_id')
         invoice = Invoice.objects.select_related('client').get(id=invoice_id)
         
+        # Determine payment status based on payment method
+        payment_method = validated_data.get('payment_method')
+        # Auto-complete non-credit card payments
+        payment_status = 'COMPLETED' if payment_method in ['CASH', 'BANK_TRANSFER', 'OTHER'] else 'PENDING'
+        
         # Create payment with invoice's organization
         payment = Payment.objects.create(
             invoice=invoice,
             client=invoice.client,
             payment_date=timezone.now().date(),
-            status='PENDING',
+            status=payment_status,
             organization_id=invoice.organization_id,
             **validated_data
         )
@@ -460,6 +465,25 @@ class UpdatePaymentSerializer(serializers.ModelSerializer):
     
     def validate_status(self, value):
         current_status = self.instance.status
+        payment_method = self.instance.payment_method
+        
+        # Get user from context
+        request = self.context.get('request')
+        user = request.user if request else None
+        
+        # Prevent manual status changes for credit card payments
+        # Only Stripe webhooks should update credit card payments
+        if payment_method == 'CREDIT_CARD' and not user.is_superuser:
+            raise serializers.ValidationError(
+                "Credit card payment status cannot be changed manually. "
+                "Status updates for credit card payments are handled automatically."
+            )
+        
+        # Check permissions for manual status updates
+        if not user.has_perm('finance.change_payment_status'):
+            raise serializers.ValidationError(
+                "You don't have permission to change payment status."
+            )
         
         # Define valid status transitions
         VALID_TRANSITIONS = {

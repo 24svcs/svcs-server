@@ -6,6 +6,7 @@ from django.urls import reverse
 from django.utils import timezone
 from .models import Invoice, Payment, Client
 from decimal import Decimal
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -142,9 +143,23 @@ class StripeService:
             dict: A response with details of the handled event
         """
         try:
-            event = stripe.Webhook.construct_event(
-                payload, signature, STRIPE_WEBHOOK_SECRET
-            )
+            # Check if we're in test mode (development environment)
+            # This allows bypassing signature verification during development
+            is_test_mode = os.environ.get('STRIPE_WEBHOOK_TEST_MODE', 'false').lower() == 'true'
+            
+            if is_test_mode:
+                # For development/testing, allow constructing event without signature verification
+                logger.warning("STRIPE_WEBHOOK_TEST_MODE is enabled. Bypassing signature verification.")
+                try:
+                    event = json.loads(payload)
+                except Exception:
+                    logger.error("Failed to parse webhook payload in test mode")
+                    raise
+            else:
+                # Production mode - enforce signature verification
+                event = stripe.Webhook.construct_event(
+                    payload, signature, STRIPE_WEBHOOK_SECRET
+                )
             
             # Handle different event types
             if event['type'] == 'payment_intent.succeeded':

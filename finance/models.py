@@ -274,9 +274,11 @@ class Payment(models.Model):
         """Override save to trigger invoice status update."""
         logger = logging.getLogger(__name__)
         
-        # Check if this is a status update on an existing payment
+        is_new = not self.pk
         is_status_update = False
-        if self.pk:
+        
+        # Check if this is a status update on an existing payment
+        if not is_new:
             try:
                 old_payment = Payment.objects.get(pk=self.pk)
                 if old_payment.status != self.status:
@@ -285,11 +287,16 @@ class Payment(models.Model):
             except Payment.DoesNotExist:
                 pass
         
+        # Auto-complete non-credit card payments on creation
+        if is_new and self.payment_method in ['CASH', 'BANK_TRANSFER', 'OTHER'] and self.status == 'PENDING':
+            self.status = 'COMPLETED'
+            logger.info(f"Auto-completing {self.payment_method} payment")
+        
         super().save(*args, **kwargs)
         
         # After saving, update the invoice status
-        if is_status_update:
-            logger.info(f"Updating invoice {self.invoice.invoice_number} status due to payment status change")
+        if is_status_update or is_new:
+            logger.info(f"Updating invoice {self.invoice.invoice_number} status due to payment change")
         
         # Force a fresh calculation by using a database query instead of cached properties
         self.invoice.update_status_based_on_payments()

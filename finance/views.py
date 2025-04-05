@@ -322,6 +322,13 @@ class PaymentViewSet(ModelViewSet):
                 {"detail": f"Cannot complete payment in {payment.status} status"},
                 status=status.HTTP_400_BAD_REQUEST
             )
+            
+        # Prevent manual completion of credit card payments
+        if payment.payment_method == 'CREDIT_CARD':
+            return Response(
+                {"detail": "Credit card payments cannot be manually completed. They are processed through Stripe."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
         
         try:
             with transaction.atomic():
@@ -352,6 +359,13 @@ class PaymentViewSet(ModelViewSet):
         if payment.status != 'PENDING':
             return Response(
                 {"detail": f"Cannot mark payment as failed in {payment.status} status"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+            
+        # Prevent manual failing of credit card payments
+        if payment.payment_method == 'CREDIT_CARD':
+            return Response(
+                {"detail": "Credit card payments cannot be manually marked as failed. They are processed through Stripe."},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
@@ -386,6 +400,13 @@ class PaymentViewSet(ModelViewSet):
                 {"detail": "Can only refund completed payments"},
                 status=status.HTTP_400_BAD_REQUEST
             )
+            
+        # For credit card payments, require additional authorization
+        if payment.payment_method == 'CREDIT_CARD' and not request.user.has_perm('finance.refund_credit_card_payment'):
+            return Response(
+                {"detail": "You don't have permission to refund credit card payments. Please contact an administrator."},
+                status=status.HTTP_403_FORBIDDEN
+            )
         
         try:
             with transaction.atomic():
@@ -413,16 +434,53 @@ class MakeInvoicePaymentViewSet(GenericViewSet, CreateModelMixin):
     permission_classes = [IsAuthenticated]
     serializer_class = CreatePaymentSerializer
     queryset = Payment.objects.all()
+    throttle_classes = [BurstRateThrottle]  # Add rate limiting
+    
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context['organization_id'] = self.kwargs.get('organization_pk')
+        return context
     
     def create(self, request, *args, **kwargs):
+        # Log the payment creation attempt
+        logger.info(f"Payment creation attempt by user {request.user.id} for invoice {request.data.get('invoice_id')}")
+        
+        # Validate the request organization context
+        organization_pk = self.kwargs.get('organization_pk')
+        if not organization_pk:
+            return Response(
+                {"detail": "Organization ID is required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Check if the user belongs to the organization
+        if not request.user.organizations.filter(id=organization_pk).exists():
+            logger.warning(f"Unauthorized payment creation attempt by user {request.user.id} "
+                         f"for organization {organization_pk}")
+            return Response(
+                {"detail": "You don't have permission to create payments for this organization"},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        # Create the payment
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        payment = serializer.save()
-        
-        return Response(
-            PaymentSerializer(payment).data,
-            status=status.HTTP_201_CREATED
-        )
+        try:
+            payment = serializer.save()
+            logger.info(f"Payment {payment.id} created successfully by user {request.user.id} "
+                      f"for invoice {payment.invoice.invoice_number}, "
+                      f"method: {payment.payment_method}, status: {payment.status}")
+            
+            return Response(
+                PaymentSerializer(payment).data,
+                status=status.HTTP_201_CREATED
+            )
+        except Exception as e:
+            logger.error(f"Payment creation failed: {str(e)}", exc_info=True)
+            return Response(
+                {"detail": f"Failed to create payment: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
 
 class StripePaymentViewSet(GenericViewSet):
@@ -511,16 +569,32 @@ class StripeWebhookView(APIView):
     View for handling Stripe webhook events.
     """
     permission_classes = [AllowAny]  # Stripe needs to access this endpoint without authentication
+    throttle_classes = [BurstRateThrottle]  # Add rate limiting to prevent abuse
     
     def post(self, request, *args, **kwargs):
         from .stripe_service import StripeService, STRIPE_WEBHOOK_SECRET
         import stripe
         import logging
+        import os
         
         logger = logging.getLogger(__name__)
         
+        # Validate webhook secret is configured
+        if not STRIPE_WEBHOOK_SECRET:
+            logger.error("Stripe webhook secret not configured")
+            return HttpResponse("Configuration error", status=500)
+        
         payload = request.body
         sig_header = request.META.get('HTTP_STRIPE_SIGNATURE')
+        
+        # Get client IP for logging and validation
+        client_ip = self._get_client_ip(request)
+        logger.info(f"Received webhook from IP: {client_ip}")
+        
+        # Optional: Validate IP against Stripe IP ranges
+        # This could be enhanced with a list of Stripe IP ranges
+        # if not self._is_valid_stripe_ip(client_ip):
+        #    logger.warning(f"Webhook request from suspicious IP: {client_ip}")
         
         if not sig_header:
             logger.error("Missing Stripe signature header in webhook request")
@@ -530,24 +604,37 @@ class StripeWebhookView(APIView):
             )
         
         try:
-            # Log webhook receipt
-            logger.info(f"Received Stripe webhook with signature: {sig_header[:10]}...")
+            # Log webhook receipt with more details
+            logger.info(f"Received Stripe webhook with signature: {sig_header[:10]}... from IP: {client_ip}")
             
             # Process the webhook
             result = StripeService.handle_payment_webhook(payload, sig_header)
             
-            # Log successful processing
-            logger.info(f"Successfully processed Stripe webhook: {result}")
+            # Log successful processing with detailed information
+            logger.info(f"Successfully processed Stripe webhook type: {result.get('event_type', 'unknown')} "
+                      f"with status: {result.get('status', 'unknown')}")
             
             # Return a 200 response to acknowledge receipt of the event
             return HttpResponse(status=200)
             
         except stripe.error.SignatureVerificationError as e:
             logger.error(f"Invalid Stripe signature: {str(e)}")
+            # Log suspicious activity
+            logger.warning(f"Potential webhook forgery attempt from IP: {client_ip}")
             return HttpResponse(status=400)
         except Exception as e:
-            logger.error(f"Error handling Stripe webhook: {str(e)}")
+            logger.error(f"Error handling Stripe webhook: {str(e)}", exc_info=True)  # Include stack trace
             return HttpResponse(status=400)
+    
+    def _get_client_ip(self, request):
+        """Get the client IP address from request headers or REMOTE_ADDR"""
+        x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
+        if x_forwarded_for:
+            # Get the first IP in case of multiple proxies
+            ip = x_forwarded_for.split(',')[0].strip()
+        else:
+            ip = request.META.get('REMOTE_ADDR')
+        return ip
 
 
 class PublicInvoicePaymentView(APIView):
