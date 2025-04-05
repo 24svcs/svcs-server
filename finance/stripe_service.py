@@ -63,7 +63,7 @@ class StripeService:
             raise
     
     @staticmethod
-    def create_payment_intent(invoice, return_url=None, payment_method_types=None):
+    def create_payment_intent(invoice, return_url=None, payment_method_types=None, amount=None):
         """
         Create a payment intent for an invoice.
         
@@ -71,6 +71,7 @@ class StripeService:
             invoice (Invoice): The invoice to create a payment intent for
             return_url (str, optional): URL to redirect after payment
             payment_method_types (list, optional): List of payment method types to accept
+            amount (Decimal, optional): Specific amount to charge, defaults to invoice.due_balance
             
         Returns:
             dict: The payment intent object
@@ -83,9 +84,12 @@ class StripeService:
             if not payment_method_types:
                 payment_method_types = ['card']
             
+            # Use the provided amount or fall back to the full invoice balance
+            payment_amount = amount if amount is not None else invoice.due_balance
+            
             # Calculate amount in cents (Stripe uses smallest currency unit)
             # For USD, that's cents, so we multiply by 100
-            amount_in_cents = int(invoice.due_balance * 100)
+            amount_in_cents = int(payment_amount * 100)
             
             # Create payment intent
             intent = stripe.PaymentIntent.create(
@@ -107,7 +111,7 @@ class StripeService:
                 organization_id=invoice.organization_id,
                 client=client,
                 invoice=invoice,
-                amount=invoice.due_balance,
+                amount=payment_amount,
                 payment_date=timezone.now().date(),  # Set current date instead of None
                 payment_method='CREDIT_CARD',
                 status='PENDING',
@@ -173,16 +177,40 @@ class StripeService:
         payment_intent = event['data']['object']
         transaction_id = payment_intent['id']
         
+        # Log the raw payment intent data for debugging
+        logger.debug(f"Handling payment_intent.succeeded for {transaction_id}")
+        logger.debug(f"Payment intent data: {payment_intent}")
+        
         try:
             # Find the payment record
             payment = Payment.objects.get(transaction_id=transaction_id)
+            
+            # Verify the payment amount matches what's in Stripe 
+            # (in cents, divide by 100 to get dollars)
+            stripe_amount = Decimal(payment_intent['amount']) / 100
+            
+            # Log if there's a discrepancy and use the Stripe amount
+            if payment.amount != stripe_amount:
+                logger.warning(
+                    f"Payment amount mismatch: DB has {payment.amount}, "
+                    f"Stripe has {stripe_amount} for transaction {transaction_id}. "
+                    f"Using the Stripe amount as source of truth."
+                )
+                # Update the payment amount to match Stripe (the source of truth)
+                original_amount = payment.amount
+                payment.amount = stripe_amount
+                payment.notes += f"\nPayment amount updated from {original_amount} to {stripe_amount} to match Stripe records."
             
             # Update payment status
             payment.status = 'COMPLETED'
             payment.payment_date = timezone.now().date()
             payment.save()
             
-            # This will trigger the invoice status update via the save method
+            # Log the successful payment
+            logger.info(
+                f"Payment {payment.id} for invoice {payment.invoice.invoice_number} "
+                f"completed successfully. Amount: {payment.amount}"
+            )
             
             return {
                 'status': 'success',

@@ -9,6 +9,7 @@ from api.libs import validate_phone
 from phonenumber_field.modelfields import PhoneNumberField
 from .utils import annotate_invoice_calculations
 from django_countries.fields import CountryField
+from django.db import models
 
 
 
@@ -171,10 +172,19 @@ class CreatePaymentSerializer(serializers.ModelSerializer):
             Invoice.objects.filter(id=data['invoice_id'])
         ).get()
         
+        # Calculate total pending payments
+        pending_payments_total = invoice.payments.filter(status='PENDING').aggregate(
+            total=models.Sum('amount', default=0)
+        )['total']
+        
+        # Calculate the available amount to pay
+        available_to_pay = invoice.calculated_balance - pending_payments_total
+        
         # Check if payment amount exceeds remaining balance
-        if data['amount'] > invoice.calculated_balance:
+        if data['amount'] > available_to_pay:
             raise serializers.ValidationError({
-                "amount": f"Payment amount ({data['amount']}) cannot exceed remaining balance ({invoice.calculated_balance})"
+                "amount": f"Payment amount ({data['amount']}) cannot exceed available balance ({available_to_pay}). " +
+                          (f"Note: There are already pending payments of {pending_payments_total}." if pending_payments_total > 0 else "")
             })
         
         return data
@@ -220,7 +230,7 @@ class InvoiceSerializer(serializers.ModelSerializer):
             'due_date', 'status', 'tax_rate', 'notes',
             'total_amount', 'tax_amount', 'paid_amount', 'due_balance', 'days_overdue',
             'pending_payments',
-            'created_at', 'updated_at', 'items'
+            'created_at', 'updated_at', 'items', 'uuid'
         ]
         
         
@@ -228,31 +238,21 @@ class InvoiceSerializer(serializers.ModelSerializer):
         return obj.client.name
     
     def get_total_amount(self, obj):
-        if hasattr(obj, 'calculated_total'):
-            return obj.calculated_total
         return obj.total_amount
     
     def get_tax_amount(self, obj):
-        if hasattr(obj, 'calculated_tax'):
-            return obj.calculated_tax
         return obj.tax_amount
     
     def get_paid_amount(self, obj):
-        if hasattr(obj, 'completed_payments_sum'):
-            return obj.completed_payments_sum
         return obj.paid_amount
     
     def get_due_balance(self, obj):
-        if hasattr(obj, 'calculated_balance'):
-            return obj.calculated_balance
         return obj.due_balance
     
     def get_days_overdue(self, obj):
         return obj.days_overdue
     
     def get_pending_payments(self, obj):
-        if hasattr(obj, 'pending_payments_sum'):
-            return obj.pending_payments_sum
         return obj.pending_payments
     
     

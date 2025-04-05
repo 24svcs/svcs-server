@@ -6,6 +6,8 @@ from django.utils import timezone
 import uuid
 from phonenumber_field.modelfields import PhoneNumberField
 from django_countries.fields import CountryField
+import logging
+from django.db.models import Sum
 
 class Address(models.Model):
     """
@@ -124,12 +126,21 @@ class Invoice(models.Model):
     
     @property
     def paid_amount(self):
-        """Calculate the amount paid toward this invoice so far."""
+        """Calculate the amount paid toward this invoice so far.
+        
+        Note: This only includes COMPLETED payments, not PENDING ones.
+        For pending payments, use the pending_payments property instead.
+        """
         # Use prefetched payments if available
         if hasattr(self, '_prefetched_objects_cache') and 'payments' in self._prefetched_objects_cache:
+            # Filter the prefetched payments to include only COMPLETED ones
             return sum(payment.amount for payment in self._prefetched_objects_cache['payments'] 
                       if payment.status == 'COMPLETED')
-        return sum(payment.amount for payment in self.payments.filter(status='COMPLETED'))
+        
+        # Otherwise query the database directly for COMPLETED payments
+        return self.payments.filter(status='COMPLETED').aggregate(
+            total=Sum('amount', default=0)
+        )['total']
     
     @property
     def due_balance(self):
@@ -157,24 +168,41 @@ class Invoice(models.Model):
         Update the invoice status based on payment status and due date.
         Called automatically when payments are created, updated, or deleted.
         """
+        logger = logging.getLogger(__name__)
+        
         # Don't change status for DRAFT or CANCELLED invoices
         if self.status in ['DRAFT', 'CANCELLED']:
+            logger.debug(f"Not updating status for invoice {self.invoice_number} because it's {self.status}")
             return
             
-        # Calculate totals
+        # Calculate totals using direct database queries to avoid caching issues
         total_amount = self.total_amount
-        total_paid = self.paid_amount
-
-        if total_paid >= total_amount:
+        
+        # Fetch the payments directly from the database to ensure fresh data
+        completed_payments = self.payments.filter(status='COMPLETED').aggregate(
+            total=Sum('amount', default=0)
+        )['total']
+        
+        # Log the values being used for the calculation
+        logger.info(f"Invoice {self.invoice_number} status update: " +
+                   f"total_amount={total_amount}, " +
+                   f"completed_payments={completed_payments}")
+        
+        old_status = self.status
+        
+        if completed_payments >= total_amount:
             self.status = 'PAID'
-        elif total_paid > 0:
+        elif completed_payments > 0:
             self.status = 'PARTIALLY_PAID'
         elif self.due_date < timezone.now().date():
             self.status = 'OVERDUE'
         else:
             self.status = 'PENDING'
             
-        self.save(update_fields=['status'])
+        # Only save if status actually changed
+        if old_status != self.status:
+            logger.info(f"Changing invoice {self.invoice_number} status from {old_status} to {self.status}")
+            self.save(update_fields=['status'])
     
     
 
@@ -244,7 +272,26 @@ class Payment(models.Model):
     
     def save(self, *args, **kwargs):
         """Override save to trigger invoice status update."""
+        logger = logging.getLogger(__name__)
+        
+        # Check if this is a status update on an existing payment
+        is_status_update = False
+        if self.pk:
+            try:
+                old_payment = Payment.objects.get(pk=self.pk)
+                if old_payment.status != self.status:
+                    is_status_update = True
+                    logger.info(f"Payment {self.pk} status changing from {old_payment.status} to {self.status}")
+            except Payment.DoesNotExist:
+                pass
+        
         super().save(*args, **kwargs)
+        
+        # After saving, update the invoice status
+        if is_status_update:
+            logger.info(f"Updating invoice {self.invoice.invoice_number} status due to payment status change")
+        
+        # Force a fresh calculation by using a database query instead of cached properties
         self.invoice.update_status_based_on_payments()
 
 class RecurringInvoice(models.Model):

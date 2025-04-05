@@ -274,7 +274,7 @@ class PaymentViewSet(ModelViewSet):
         return Payment.objects.select_related(
             'client',
             'invoice',
-            'client__address'  # Also select client address to avoid additional queries
+            'client'  # Also select client address to avoid additional queries
         ).filter(
             client__organization_id=self.kwargs['organization_pk']
         ).order_by('-created_at')
@@ -461,16 +461,31 @@ class StripePaymentViewSet(GenericViewSet):
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
-            # Create payment intent
+            # Calculate total pending payments
+            pending_payments_total = invoice.payments.filter(status='PENDING').aggregate(
+                total=models.Sum('amount', default=0)
+            )['total']
+            
+            # Calculate the available amount to pay
+            available_to_pay = invoice.due_balance - pending_payments_total
+            
+            if available_to_pay <= 0:
+                return Response(
+                    {"detail": "This invoice already has pending payments covering the full amount. Please wait for those payments to be processed."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Create payment intent for the available amount
             payment_data = StripeService.create_payment_intent(
                 invoice,
-                return_url=request.data.get('return_url')
+                return_url=request.data.get('return_url'),
+                amount=available_to_pay
             )
             
             return Response({
                 "client_secret": payment_data['client_secret'],
                 "payment_id": payment_data['payment_id'],
-                "amount": invoice.due_balance,
+                "available_to_pay": available_to_pay,
                 "invoice_number": invoice.invoice_number
             })
             
@@ -499,25 +514,38 @@ class StripeWebhookView(APIView):
     
     def post(self, request, *args, **kwargs):
         from .stripe_service import StripeService, STRIPE_WEBHOOK_SECRET
+        import stripe
+        import logging
+        
+        logger = logging.getLogger(__name__)
         
         payload = request.body
         sig_header = request.META.get('HTTP_STRIPE_SIGNATURE')
         
         if not sig_header:
+            logger.error("Missing Stripe signature header in webhook request")
             return Response(
                 {"detail": "Missing Stripe signature header"},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
         try:
+            # Log webhook receipt
+            logger.info(f"Received Stripe webhook with signature: {sig_header[:10]}...")
+            
             # Process the webhook
             result = StripeService.handle_payment_webhook(payload, sig_header)
+            
+            # Log successful processing
+            logger.info(f"Successfully processed Stripe webhook: {result}")
             
             # Return a 200 response to acknowledge receipt of the event
             return HttpResponse(status=200)
             
+        except stripe.error.SignatureVerificationError as e:
+            logger.error(f"Invalid Stripe signature: {str(e)}")
+            return HttpResponse(status=400)
         except Exception as e:
-            logger = logging.getLogger(__name__)
             logger.error(f"Error handling Stripe webhook: {str(e)}")
             return HttpResponse(status=400)
 
@@ -533,8 +561,11 @@ class PublicInvoicePaymentView(APIView):
         """
         Get invoice details for a public payment page or serve the HTML template.
         """
-        # If no invoice_uuid provided, serve the HTML template
-        if invoice_uuid is None:
+        # Check if the request is from a browser looking for HTML
+        wants_html = 'text/html' in request.headers.get('Accept', '')
+        
+        # If no invoice_uuid provided or browser requests HTML, serve the HTML template
+        if invoice_uuid is None or wants_html:
             from django.http import HttpResponse
             from django.conf import settings
             import os
@@ -552,19 +583,35 @@ class PublicInvoicePaymentView(APIView):
                     status=status.HTTP_404_NOT_FOUND
                 )
         
-        # If invoice_uuid provided, return the invoice details
+        # If invoice_uuid provided and API request, return the invoice details as JSON
         try:
-            # Find the invoice by its public UUID
-            invoice = Invoice.objects.select_related('client').get(uuid=invoice_uuid)
+            # Find the invoice by its public UUID and annotate with calculations
+            from .utils import annotate_invoice_calculations
+            invoice_queryset = annotate_invoice_calculations(
+                Invoice.objects.select_related('client').prefetch_related('payments')
+            )
+            invoice = invoice_queryset.get(uuid=invoice_uuid)
+            
+            # Calculate pending payments manually to ensure accuracy
+            pending_payments = invoice.payments.filter(status='PENDING').aggregate(
+                total=models.Sum('amount', default=0)
+            )['total']
+            
+            # Calculate the actual amount available for payment
+            available_to_pay = invoice.due_balance - pending_payments
             
             # Only return minimal information needed for payment
             data = {
                 'invoice_number': invoice.invoice_number,
                 'client_name': invoice.client.name,
-                'amount': invoice.due_balance,
+                'invoice_total': invoice.total_amount,
+                'paid_amount': invoice.paid_amount,
+                'available_to_pay': available_to_pay,  # Renamed from 'amount' for clarity
                 'status': invoice.status,
                 'due_date': invoice.due_date,
-                'can_pay': invoice.status in ['PENDING', 'OVERDUE', 'PARTIALLY_PAID'] and invoice.due_balance > 0
+                'pending_payments': pending_payments,
+                'can_pay': (invoice.status in ['PENDING', 'OVERDUE', 'PARTIALLY_PAID'] 
+                            and available_to_pay > 0)
             }
             
             return Response(data)
@@ -600,16 +647,31 @@ class PublicInvoicePaymentView(APIView):
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
-            # Create payment intent
+            # Calculate total pending payments
+            pending_payments_total = invoice.payments.filter(status='PENDING').aggregate(
+                total=models.Sum('amount', default=0)
+            )['total']
+            
+            # Calculate the available amount to pay
+            available_to_pay = invoice.due_balance - pending_payments_total
+            
+            if available_to_pay <= 0:
+                return Response(
+                    {"detail": "This invoice already has pending payments covering the full amount. Please wait for those payments to be processed."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Create payment intent for the available amount
             payment_data = StripeService.create_payment_intent(
                 invoice,
-                return_url=request.data.get('return_url')
+                return_url=request.data.get('return_url'),
+                amount=available_to_pay
             )
             
             return Response({
                 "client_secret": payment_data['client_secret'],
                 "payment_id": payment_data['payment_id'],
-                "amount": invoice.due_balance,
+                "available_to_pay": available_to_pay,
                 "invoice_number": invoice.invoice_number,
                 "publishable_key": os.environ.get('STRIPE_PUBLISHABLE_KEY')
             })
