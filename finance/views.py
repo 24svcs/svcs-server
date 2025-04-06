@@ -1,8 +1,8 @@
 from rest_framework.viewsets import ModelViewSet, GenericViewSet
 from rest_framework.mixins import CreateModelMixin, DestroyModelMixin
 import logging
-from decimal import Decimal, DecimalException, InvalidOperation
-from django.core.exceptions import ValidationError, DecimalValidator
+from decimal import Decimal, DecimalException
+
 
 from .serializers import (
     Client, ClientSerializer, CreateClientSerializer,
@@ -57,7 +57,6 @@ class ClientModelViewset(ModelViewSet):
         return Client.objects.prefetch_related(
             Prefetch('invoices', queryset=invoice_queryset),
             Prefetch('payments', queryset=payment_queryset),
-            # Prefetch('addresses', queryset=address_queryset)
         ).filter(organization_id=self.kwargs['organization_pk'])
     
     serializer_class = ClientSerializer
@@ -291,6 +290,7 @@ class PaymentViewSet(ModelViewSet):
     def get_serializer_context(self):
         context = super().get_serializer_context()
         context['organization_id'] = self.kwargs['organization_pk']
+        context['request'] = self.request
         return context
     
     def list(self, request, *args, **kwargs):

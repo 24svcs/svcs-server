@@ -138,25 +138,16 @@ class PaymentSerializer(serializers.ModelSerializer):
 
 class CreatePaymentSerializer(serializers.ModelSerializer):
     invoice_id = serializers.IntegerField()
+    payment_date = serializers.DateField(required=False)
     
     class Meta:
         model = Payment
-        fields = ['invoice_id', 'amount', 'payment_method', 'notes']
+        fields = ['invoice_id', 'amount', 'payment_method', 'notes', 'payment_date']
     
     def validate_invoice_id(self, value):
         try:
-            # Use utility function for annotations
-            invoice = annotate_invoice_calculations(
-                Invoice.objects.select_related('client')
-            ).get(id=value)
-            
-            # Check if invoice can accept payments
-            if invoice.status not in ['PENDING', 'OVERDUE', 'PARTIALLY_PAID']:
-                raise serializers.ValidationError(
-                    f"Cannot add payment to invoice in {invoice.status} status. "
-                    "Invoice must be PENDING, OVERDUE, or PARTIALLY_PAID"
-                )
-            
+            # Simply check if the invoice exists
+            invoice = Invoice.objects.get(pk=value)
             return value
         except Invoice.DoesNotExist:
             raise serializers.ValidationError("Invalid invoice ID")
@@ -166,40 +157,103 @@ class CreatePaymentSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Payment amount must be greater than 0")
         return value
     
+    def validate_payment_method(self, value):
+        allowed_methods = ['CASH', 'BANK_TRANSFER']
+        if value not in allowed_methods:
+            raise serializers.ValidationError(
+                f"Only manual payment methods ({', '.join(allowed_methods)}) are allowed. "
+                "Other payment types must be processed through their respective payment gateways."
+            )
+        return value
+        
+    def validate_payment_date(self, value):
+        if value and value > timezone.now().date():
+            raise serializers.ValidationError("Payment date cannot be in the future")
+        return value
+    
     def validate(self, data):
-        # Get invoice and validate payment amount using utility function
+        # Get invoice with annotations for calculations
         invoice = annotate_invoice_calculations(
             Invoice.objects.filter(id=data['invoice_id'])
         ).get()
         
-        # Calculate total pending payments
-        pending_payments_total = invoice.payments.filter(status='PENDING').aggregate(
-            total=models.Sum('amount', default=0)
-        )['total']
+        # Check if invoice can accept payments
+        if invoice.status not in ['PENDING', 'OVERDUE', 'PARTIALLY_PAID']:
+            raise serializers.ValidationError({
+                "invoice_id": f"Cannot add payment to invoice in {invoice.status} status. "
+                "Invoice must be PENDING, OVERDUE, or PARTIALLY_PAID"
+            })
+            
+        # Check if there are any pending payments for this invoice
+        pending_payments_exist = invoice.payments.filter(status='PENDING').exists()
+        if pending_payments_exist:
+            raise serializers.ValidationError({
+                "invoice_id": "This invoice already has a pending payment. Please wait for the pending payment to be processed before adding a new payment."
+            })
         
-        # Calculate the available amount to pay
-        available_to_pay = invoice.calculated_balance - pending_payments_total
+        # Calculate the due balance amount to pay
+        balance = invoice.due_balance
         
         # Check if payment amount exceeds remaining balance
-        if data['amount'] > available_to_pay:
+        if data['amount'] > balance:
             raise serializers.ValidationError({
-                "amount": f"Payment amount ({data['amount']}) cannot exceed available balance ({available_to_pay}). " +
-                          (f"Note: There are already pending payments of {pending_payments_total}." if pending_payments_total > 0 else "")
+                "amount": f"Payment amount ({data['amount']}) cannot exceed due balance ({balance})."
             })
         
         # Check for partial payment restrictions
-        if data['amount'] < available_to_pay:  # This is a partial payment
+        if data['amount'] < balance:  # This is a partial payment
             if not invoice.allow_partial_payments:
                 raise serializers.ValidationError({
-                    "amount": f"This invoice does not allow partial payments. Payment amount must be {available_to_pay}."
+                    "amount": f"This invoice does not allow partial payments. Payment amount must be {balance}."
                 })
             
             # Check if payment meets minimum amount requirement
-            if data['amount'] < invoice.minimum_payment_amount:
+            # Allow payment if it equals the due balance, even if less than minimum
+            if data['amount'] < invoice.minimum_payment_amount and data['amount'] != balance:
                 raise serializers.ValidationError({
-                    "amount": f"Payment amount must be at least {invoice.minimum_payment_amount} for partial payments."
+                    "amount": f"Payment amount must be at least {invoice.minimum_payment_amount} for partial payments or equal to the remaining balance ({balance})."
                 })
         
+        # Check if payment is too small to be practical (e.g., less than $0.50)
+        # Skip this check for final payments that clear the balance
+        if data['amount'] < Decimal('0.50') and data['amount'] != balance:
+            raise serializers.ValidationError({
+                "amount": "Payment amount is too small. Minimum payment amount should be at least $0.50 unless it's the final payment that clears the balance."
+            })
+        
+        # Validate payment date isn't in the future if provided
+        if 'payment_date' in data and data['payment_date'] > timezone.now().date():
+            raise serializers.ValidationError({
+                "payment_date": "Payment date cannot be in the future."
+            })
+                  
+        # Check for duplicate payments in the last 24 hours
+        recent_time_24h = timezone.now() - timezone.timedelta(hours=24)
+        duplicate_payments = Payment.objects.filter(
+            invoice_id=data['invoice_id'],
+            amount=data['amount'],
+            created_at__gte=recent_time_24h
+        ).exists()
+        
+        if duplicate_payments:
+            raise serializers.ValidationError({
+                "non_field_errors": "A payment with the same amount was recently recorded for this invoice. "
+                                  "This might be a duplicate payment. Please confirm before proceeding."
+            })
+        
+        # Check for any payments in the last 5 minutes
+        recent_time_5m = timezone.now() - timezone.timedelta(minutes=5)
+        recent_payments = Payment.objects.filter(
+            invoice_id=data['invoice_id'],
+            created_at__gte=recent_time_5m
+        ).exists()
+        
+        if recent_payments:
+            raise serializers.ValidationError({
+                "non_field_errors": "A payment was recorded for this invoice in the last 5 minutes. "
+                                  "Please wait before adding another payment."
+            })
+            
         return data
     
     @transaction.atomic
@@ -207,25 +261,25 @@ class CreatePaymentSerializer(serializers.ModelSerializer):
         invoice_id = validated_data.pop('invoice_id')
         invoice = Invoice.objects.select_related('client').get(id=invoice_id)
         
-        # Determine payment status based on payment method
-        payment_method = validated_data.get('payment_method')
-        # Auto-complete non-credit card payments
-        payment_status = 'COMPLETED' if payment_method in ['CASH', 'BANK_TRANSFER', 'OTHER'] else 'PENDING'
+        # Set payment date to today if not provided
+        if 'payment_date' not in validated_data:
+            validated_data['payment_date'] = timezone.now().date()
         
-        # Create payment with invoice's organization
+        # All payments created through this serializer are manual and marked as COMPLETED
         payment = Payment.objects.create(
             invoice=invoice,
             client=invoice.client,
-            payment_date=timezone.now().date(),
-            status=payment_status,
+            status='COMPLETED',
             organization_id=invoice.organization_id,
             **validated_data
         )
         
+        # Update invoice status after payment
+        invoice.update_status_based_on_payments()
+        
         return payment
     
     def to_representation(self, instance):
-        # Use the detailed PaymentSerializer for the response
         return PaymentSerializer(instance).data
 
 
@@ -239,7 +293,6 @@ class InvoiceSerializer(serializers.ModelSerializer):
     tax_amount = serializers.SerializerMethodField()
     paid_amount = serializers.SerializerMethodField()
     due_balance = serializers.SerializerMethodField()
-    pending_payments = serializers.SerializerMethodField()
     late_fee_amount = serializers.SerializerMethodField()
     total_with_late_fees = serializers.SerializerMethodField()
     payment_progress_percentage = serializers.SerializerMethodField()
@@ -250,7 +303,7 @@ class InvoiceSerializer(serializers.ModelSerializer):
             'id','client', 'invoice_number', 'issue_date',
             'due_date', 'status', 'tax_rate', 'notes',
             'total_amount', 'tax_amount', 'paid_amount', 'due_balance', 'days_overdue',
-            'pending_payments', 'late_fee_percentage', 'late_fee_applied', 'late_fee_amount',
+            'late_fee_percentage', 'late_fee_applied', 'late_fee_amount',
             'total_with_late_fees', 'payment_progress_percentage', 'allow_partial_payments',
             'minimum_payment_amount', 'created_at', 'updated_at', 'items', 'uuid'
         ]
@@ -273,9 +326,6 @@ class InvoiceSerializer(serializers.ModelSerializer):
     
     def get_days_overdue(self, obj):
         return obj.days_overdue
-    
-    def get_pending_payments(self, obj):
-        return obj.pending_payments
     
     def get_late_fee_amount(self, obj):
         return obj.late_fee_amount

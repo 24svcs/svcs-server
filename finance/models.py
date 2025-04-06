@@ -180,14 +180,7 @@ class Invoice(models.Model):
             return (timezone.now().date() - self.due_date).days
         return 0
     
-    @property
-    def pending_payments(self):
-        """Calculate the sum of pending payments for this invoice."""
-        # Use prefetched payments if available
-        if hasattr(self, '_prefetched_objects_cache') and 'payments' in self._prefetched_objects_cache:
-            return sum(payment.amount for payment in self._prefetched_objects_cache['payments'] 
-                      if payment.status == 'PENDING')
-        return sum(payment.amount for payment in self.payments.filter(status='PENDING'))
+    
     
     def update_status_based_on_payments(self):
         """
@@ -334,7 +327,10 @@ class Payment(models.Model):
         ('CASH', 'Cash'),
         ('BANK_TRANSFER', 'Bank Transfer'),
         ('CREDIT_CARD', 'Credit Card'),
+        ('PAYPAL', 'PayPal'),
+        ('MON_CASH', 'Mon Cash'),
         ('OTHER', 'Other'),
+        
     ]
     
     PAYMENT_STATUS_CHOICES = [
@@ -413,6 +409,11 @@ class Payment(models.Model):
         
         # Force a fresh calculation by using a database query instead of cached properties
         self.invoice.update_status_based_on_payments()
+        
+        
+        
+        
+        
 
 class RecurringInvoice(models.Model):
     """
