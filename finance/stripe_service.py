@@ -1,16 +1,14 @@
 import stripe
 import logging
 import os
-from django.conf import settings
-from django.urls import reverse
+
 from django.utils import timezone
-from .models import Invoice, Payment, Client
+from .models import  Payment
 from decimal import Decimal
 import json
 
 logger = logging.getLogger(__name__)
 
-# Initialize Stripe with the API key from environment variables
 stripe.api_key = os.environ.get('STRIPE_GLOBAL_API_KEY')
 STRIPE_WEBHOOK_SECRET = os.environ.get('STRIPE_WEBHOOK_SECRET')
 
@@ -95,7 +93,7 @@ class StripeService:
             # Create payment intent
             intent = stripe.PaymentIntent.create(
                 amount=amount_in_cents,
-                currency='usd',  # Replace with your currency
+                currency='usd',  
                 customer=customer_id,
                 payment_method_types=payment_method_types,
                 description=f"Payment for Invoice #{invoice.invoice_number}",
@@ -113,7 +111,7 @@ class StripeService:
                 client=client,
                 invoice=invoice,
                 amount=payment_amount,
-                payment_date=timezone.now().date(),  # Set current date instead of None
+                payment_date=timezone.now().date(), 
                 payment_method='CREDIT_CARD',
                 status='PENDING',
                 transaction_id=intent.id,

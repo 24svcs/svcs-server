@@ -367,6 +367,8 @@ class CreateInvoiceItemSerializer(serializers.ModelSerializer):
 class CreateInvoiceSerializer(serializers.ModelSerializer):
     items = CreateInvoiceItemSerializer(many=True)
     client_id = serializers.IntegerField()
+    allow_partial_payments = serializers.BooleanField(required=True)
+    minimum_payment_amount = serializers.DecimalField(max_digits=10, decimal_places=2, required=True)
     
     class Meta:
         model = Invoice
@@ -420,19 +422,41 @@ class CreateInvoiceSerializer(serializers.ModelSerializer):
                 "items": "Invoice must have at least one item"
             })
             
+        # Calculate total invoice amount
+        total_amount = Decimal('0')
+        for item in data.get('items', []):
+            quantity = Decimal(str(item['quantity']))
+            unit_price = Decimal(str(item['unit_price']))
+            total_amount += quantity * unit_price
+        
+        # Add tax if specified
+        if 'tax_rate' in data:
+            tax_rate = Decimal(str(data['tax_rate']))
+            total_amount += total_amount * (tax_rate / Decimal('100'))
+            
         # Validate partial payment settings
         allow_partial = data.get('allow_partial_payments', False)
         minimum_payment = data.get('minimum_payment_amount', Decimal('0.00'))
         
-        if allow_partial and minimum_payment <= 0:
+        if minimum_payment > total_amount:
             raise serializers.ValidationError({
-                "minimum_payment_amount": "Minimum payment amount must be greater than 0 when partial payments are allowed"
+                "minimum_payment_amount": "Minimum payment amount cannot be greater than the total invoice amount"
             })
-            
-        if not allow_partial and minimum_payment > 0:
-            raise serializers.ValidationError({
-                "minimum_payment_amount": "Minimum payment amount should be 0 when partial payments are not allowed"
-            })
+        
+        if allow_partial:
+            if minimum_payment <= 0:
+                raise serializers.ValidationError({
+                    "minimum_payment_amount": "Minimum payment amount must be greater than 0 when partial payments are allowed"
+                })
+            if minimum_payment >= total_amount:
+                raise serializers.ValidationError({
+                    "minimum_payment_amount": "When partial payments are allowed, minimum payment amount must be less than the total invoice amount"
+                })
+        else:
+            if minimum_payment > 0:
+                raise serializers.ValidationError({
+                    "minimum_payment_amount": "Minimum payment amount should be 0 when partial payments are not allowed"
+                })
         
         # Validate late fee percentage
         late_fee = data.get('late_fee_percentage', Decimal('0.00'))

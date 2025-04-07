@@ -9,6 +9,6 @@ urlpatterns = [
     path('api-auth/', include('rest_framework.urls')),
     path('api/', include('api.urls')),
     path('payment/',include('django_moncash.urls')),
-    path('pay-invoice/', PublicInvoicePaymentView.as_view(), name='pay-invoice-form'),
-    path('pay-invoice/<uuid:invoice_uuid>/', PublicInvoicePaymentView.as_view(), name='pay-invoice'),
+    path('create-invoice-payment/<uuid:invoice_uuid>/', PublicInvoicePaymentView.as_view(), name='invoice-payment'),
+    
 ]  + debug_toolbar_urls()

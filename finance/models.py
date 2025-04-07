@@ -108,15 +108,19 @@ class Invoice(models.Model):
     )
     late_fee_applied = models.BooleanField(
         default=False,
+        editable=False,
         help_text="Whether late fee has been applied"
     )
     last_reminder_date = models.DateField(
         null=True, blank=True,
+        editable=False,
         help_text="Date when the last reminder was sent"
     )
     payment_reminders_sent = models.PositiveIntegerField(
-        default=0, help_text="Number of payment reminders sent"
-        )
+        default=0, 
+        editable=False,
+        help_text="Number of payment reminders sent"
+    )
     minimum_payment_amount = models.DecimalField(
         max_digits=10, decimal_places=2,
         default=Decimal('0.00'),
@@ -124,6 +128,7 @@ class Invoice(models.Model):
     )
     allow_partial_payments = models.BooleanField(
         default=False,
+        editable=False,
         help_text="Whether partial payments are allowed"
     )
 

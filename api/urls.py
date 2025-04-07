@@ -13,7 +13,6 @@ from finance.views import (
     ClientModelViewset,
     InvoiceViewSet,
     PaymentViewSet,
-    MakeInvoicePaymentViewSet,
     BulkInvoiceItemViewSet,
     RecurringInvoiceViewSet,
     ClientAddressViewSet,
@@ -25,9 +24,7 @@ from api.views import (
     notify_customers_view, 
     refine_attendance_records_view, 
     generate_attendance_reports_view, 
-    send_email, 
-    send_invite_email,
-    buy
+
 )
 
 # Main router for non-nested routes
@@ -35,8 +32,6 @@ router = routers.DefaultRouter()
 router.register('languages', LanguageViewSet, basename='languages')
 router.register(r'organizations', OrganizationViewSet, basename='organizations')
 router.register('users', UserViewSet, basename='users')
-router.register('make-invoice-payments', MakeInvoicePaymentViewSet, basename='make-invoice-payments')
-
 # Nested routers
 user_invitation_router = routers.NestedDefaultRouter(router, r'users', lookup='user')
 user_invitation_router.register(r'invitations', UserInvitationViewSet, basename='invitation')
@@ -106,8 +101,5 @@ urlpatterns = [
     path(r'notify-customers/', notify_customers_view, name='notify-customers'),
     path(r'refine-attendance-records/', refine_attendance_records_view, name='refine-attendance-records'),
     path(r'generate-attendance-reports/', generate_attendance_reports_view, name='generate-attendance-reports'),
-    path(r'send-email/', send_email, name='send-email'),
-    path(r'send-invite-email/', send_invite_email, name='send-invite-email'),
-    path(r'buy/', buy, name='buy'),
     path(r'stripe-webhook/', StripeWebhookView.as_view(), name='stripe-webhook'),
 ]

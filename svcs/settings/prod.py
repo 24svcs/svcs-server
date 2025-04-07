@@ -36,7 +36,8 @@ ALLOWED_HOSTS = [
     'https://svcs-attendance-tracker.vercel.app',
     '.vercel.app',
     '.railway.app',
-    'attendance.24svcs.com'
+    'attendance.24svcs.com',
+    'http://localhost:3000'
     
 ]
 
@@ -64,12 +65,13 @@ CSRF_TRUSTED_ORGINS = [
     '.vercel.app',
     '.railway.app',
     'https://attendance.24svcs.com',
-    'localhost:8000/'
+    'localhost:8000/',
+    'http://localhost:3000'
     ]
 SESSION_COOKIE_SECURE = True
 SESSION_COOKIE_HTTPONLY = True
 CSRF_COOKIE_SECURE = True
-
+CORS_ALLOW_CREDENTIALS = True
 
 
 LOGGING = {

@@ -28,6 +28,9 @@ from .utils import annotate_invoice_calculations, calculate_payment_statistics
 from api.throttling import BurstRateThrottle, SustainedRateThrottle
 import uuid
 from .serializers import ClientAddressSerializer, Address
+from rest_framework.views import APIView
+from django.http import HttpResponse
+from rest_framework.permissions import AllowAny
 
 logger = logging.getLogger(__name__)
 
@@ -312,83 +315,6 @@ class PaymentViewSet(ModelViewSet):
         serializer = self.get_serializer(queryset, many=True)
         return Response(serializer.data)
     
-    @action(detail=True, methods=['post'])
-    def complete(self, request, organization_pk=None, pk=None):
-        """
-        Mark a payment as completed and update the invoice status accordingly.
-        """
-        payment = self.get_object()
-        
-        if payment.status != 'PENDING':
-            return Response(
-                {"detail": f"Cannot complete payment in {payment.status} status"},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-            
-        # Prevent manual completion of credit card payments
-        if payment.payment_method == 'CREDIT_CARD':
-            return Response(
-                {"detail": "Credit card payments cannot be manually completed. They are processed through Stripe."},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        try:
-            with transaction.atomic():
-                # Update payment status
-                payment.status = 'COMPLETED'
-                payment.save()
-                
-                # Update invoice status
-                invoice = payment.invoice
-                invoice.update_status_based_on_payments()
-                
-                serializer = self.get_serializer(payment)
-                return Response(serializer.data)
-                
-        except Exception as e:
-            return Response(
-                {"detail": f"Failed to complete payment: {str(e)}"},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
-    
-    @action(detail=True, methods=['post'])
-    def fail(self, request, organization_pk=None, pk=None):
-        """
-        Mark a payment as failed and update the invoice status.
-        """
-        payment = self.get_object()
-        
-        if payment.status != 'PENDING':
-            return Response(
-                {"detail": f"Cannot mark payment as failed in {payment.status} status"},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-            
-        # Prevent manual failing of credit card payments
-        if payment.payment_method == 'CREDIT_CARD':
-            return Response(
-                {"detail": "Credit card payments cannot be manually marked as failed. They are processed through Stripe."},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        try:
-            with transaction.atomic():
-                # Update payment status
-                payment.status = 'FAILED'
-                payment.save()
-                
-                # Update invoice status
-                invoice = payment.invoice
-                invoice.update_status_based_on_payments()
-                
-                serializer = self.get_serializer(payment)
-                return Response(serializer.data)
-                
-        except Exception as e:
-            return Response(
-                {"detail": f"Failed to mark payment as failed: {str(e)}"},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
     
     @action(detail=True, methods=['post'])
     def refund(self, request, organization_pk=None, pk=None):
@@ -427,64 +353,10 @@ class PaymentViewSet(ModelViewSet):
                 {"detail": f"Failed to process refund: {str(e)}"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
-    
-class MakeInvoicePaymentViewSet(GenericViewSet, CreateModelMixin):
-    """
-    A simplified viewset for creating payments using only invoice ID.
-    This viewset only supports creating new payments.
-    """
-    permission_classes = [IsAuthenticated]
-    serializer_class = CreatePaymentSerializer
-    queryset = Payment.objects.all()
-    throttle_classes = [BurstRateThrottle]  # Add rate limiting
-    
-    def get_serializer_context(self):
-        context = super().get_serializer_context()
-        context['organization_id'] = self.kwargs.get('organization_pk')
-        return context
-    
-    def create(self, request, *args, **kwargs):
-        # Log the payment creation attempt
-        logger.info(f"Payment creation attempt by user {request.user.id} for invoice {request.data.get('invoice_id')}")
-        
-        # Validate the request organization context
-        organization_pk = self.kwargs.get('organization_pk')
-        if not organization_pk:
-            return Response(
-                {"detail": "Organization ID is required"},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        # Check if the user belongs to the organization
-        if not request.user.organizations.filter(id=organization_pk).exists():
-            logger.warning(f"Unauthorized payment creation attempt by user {request.user.id} "
-                         f"for organization {organization_pk}")
-            return Response(
-                {"detail": "You don't have permission to create payments for this organization"},
-                status=status.HTTP_403_FORBIDDEN
-            )
-        
-        # Create the payment
-        serializer = self.get_serializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        try:
-            payment = serializer.save()
-            logger.info(f"Payment {payment.id} created successfully by user {request.user.id} "
-                      f"for invoice {payment.invoice.invoice_number}, "
-                      f"method: {payment.payment_method}, status: {payment.status}")
             
-            return Response(
-                PaymentSerializer(payment).data,
-                status=status.HTTP_201_CREATED
-            )
-        except Exception as e:
-            logger.error(f"Payment creation failed: {str(e)}", exc_info=True)
-            return Response(
-                {"detail": f"Failed to create payment: {str(e)}"},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
-
-
+            
+            
+# ================================ Stripe Payment Viewset ================================
 class StripePaymentViewSet(GenericViewSet):
     """
     ViewSet for processing payments through Stripe.
@@ -499,6 +371,7 @@ class StripePaymentViewSet(GenericViewSet):
         Returns a client secret to be used for Stripe checkout on the frontend.
         """
         from .stripe_service import StripeService
+        from datetime import timedelta
         
         try:
             # Get invoice
@@ -520,18 +393,85 @@ class StripePaymentViewSet(GenericViewSet):
                     {"detail": "Invoice has no balance due"},
                     status=status.HTTP_400_BAD_REQUEST
                 )
-            
-            # Calculate total pending payments
-            pending_payments_total = invoice.payments.filter(status='PENDING').aggregate(
-                total=models.Sum('amount', default=0)
-            )['total']
+                
+            # Check if there are any pending payments for this invoice
+            pending_payments_exist = invoice.payments.filter(status='PENDING').exists()
+            if pending_payments_exist:
+                return Response(
+                    {"detail": "This invoice already has a pending payment. Please wait for the pending payment to be processed before adding a new payment."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
             
             # Calculate the available amount to pay
-            available_to_pay = invoice.due_balance - pending_payments_total
+            amount_to_pay = invoice.due_balance
             
-            if available_to_pay <= 0:
+            # Check for partial payment restrictions if amount provided
+            requested_amount = request.data.get('amount')
+            if requested_amount:
+                try:
+                    requested_amount = Decimal(str(requested_amount))
+                    
+                    # Check if payment is too small to be practical (e.g., less than $0.50)
+                    # Skip this check for final payments that clear the balance
+                    if requested_amount < Decimal('0.50') and requested_amount != amount_to_pay:
+                        return Response(
+                            {"detail": "Payment amount is too small. Minimum payment amount should be at least $0.50 unless it's the final payment that clears the balance."},
+                            status=status.HTTP_400_BAD_REQUEST
+                        )
+                    
+                    # Check for partial payment restrictions
+                    if requested_amount < amount_to_pay:  # This would be a partial payment
+                        if not invoice.allow_partial_payments:
+                            return Response(
+                                {"detail": f"This invoice does not allow partial payments. Payment amount must be {amount_to_pay}."},
+                                status=status.HTTP_400_BAD_REQUEST
+                            )
+                        
+                        # Check minimum payment amount for partial payments
+                        if requested_amount < invoice.minimum_payment_amount:
+                            return Response(
+                                {"detail": f"Payment amount must be at least {invoice.minimum_payment_amount} for partial payments."},
+                                status=status.HTTP_400_BAD_REQUEST
+                            )
+                    
+                    # Ensure payment doesn't exceed available amount
+                    if requested_amount > amount_to_pay:
+                        requested_amount = amount_to_pay
+                    
+                    # Use requested amount if valid
+                    amount_to_pay = requested_amount
+                    
+                except (ValueError, TypeError, DecimalException):
+                    return Response(
+                        {"detail": "Invalid payment amount"},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+            
+            # Check for duplicate payments in the last 24 hours
+            recent_time_24h = timezone.now() - timedelta(hours=24)
+            duplicate_payments = Payment.objects.filter(
+                invoice_id=invoice.id,
+                amount=amount_to_pay,
+                payment_method='CREDIT_CARD',
+                created_at__gte=recent_time_24h
+            ).exists()
+            
+            if duplicate_payments:
                 return Response(
-                    {"detail": "This invoice already has pending payments covering the full amount. Please wait for those payments to be processed."},
+                    {"detail": "A payment with the same amount was recently recorded for this invoice. This might be a duplicate payment."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Check for any payments in the last 5 minutes
+            recent_time_5m = timezone.now() - timedelta(minutes=5)
+            recent_payments = Payment.objects.filter(
+                invoice_id=invoice.id,
+                created_at__gte=recent_time_5m
+            ).exists()
+            
+            if recent_payments:
+                return Response(
+                    {"detail": "A payment was recorded for this invoice in the last 5 minutes. Please wait before adding another payment."},
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
@@ -539,13 +479,13 @@ class StripePaymentViewSet(GenericViewSet):
             payment_data = StripeService.create_payment_intent(
                 invoice,
                 return_url=request.data.get('return_url'),
-                amount=available_to_pay
+                amount=amount_to_pay
             )
             
             return Response({
                 "client_secret": payment_data['client_secret'],
                 "payment_id": payment_data['payment_id'],
-                "available_to_pay": available_to_pay,
+                "amount": amount_to_pay,
                 "invoice_number": invoice.invoice_number
             })
             
@@ -561,17 +501,14 @@ class StripePaymentViewSet(GenericViewSet):
             )
 
 
-from rest_framework.views import APIView
-from django.http import HttpResponse
-from rest_framework.permissions import AllowAny
-
+# ================================ Stripe Webhook View ================================
 
 class StripeWebhookView(APIView):
     """
     View for handling Stripe webhook events.
     """
-    permission_classes = [AllowAny]  # Stripe needs to access this endpoint without authentication
-    throttle_classes = [BurstRateThrottle]  # Add rate limiting to prevent abuse
+    permission_classes = [AllowAny]  
+    throttle_classes = [BurstRateThrottle] 
     
     def post(self, request, *args, **kwargs):
         from .stripe_service import StripeService, STRIPE_WEBHOOK_SECRET
@@ -639,43 +576,33 @@ class StripeWebhookView(APIView):
         return ip
 
 
+
+
+
+
 class PublicInvoicePaymentView(APIView):
     """
     Public API for processing invoice payments without authentication.
-    Requires a valid invoice UUID and a payment token.
+    Requires a valid invoice UUID.
     """
     permission_classes = [AllowAny]
     
     def get(self, request, invoice_uuid=None, format=None):
         """
-        Get invoice details for a public payment page or serve the HTML template.
+        Get invoice details and Stripe publishable key in one request.
         """
-        # Check if the request is from a browser looking for HTML
-        wants_html = 'text/html' in request.headers.get('Accept', '')
+        # If no invoice_uuid provided, return error
+        if invoice_uuid is None:
+            return Response(
+                {"detail": "Invoice UUID is required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
         
-        # If no invoice_uuid provided or browser requests HTML, serve the HTML template
-        if invoice_uuid is None or wants_html:
-            from django.http import HttpResponse
-            from django.conf import settings
-            import os
-            
-            # Get the HTML template path
-            template_path = os.path.join(settings.BASE_DIR, 'static', 'templates', 'invoice_payment.html')
-            
-            try:
-                with open(template_path, 'r') as f:
-                    html_content = f.read()
-                return HttpResponse(html_content, content_type='text/html')
-            except FileNotFoundError:
-                return Response(
-                    {"detail": "Payment template not found"},
-                    status=status.HTTP_404_NOT_FOUND
-                )
-        
-        # If invoice_uuid provided and API request, return the invoice details as JSON
         try:
             # Find the invoice by its public UUID and annotate with calculations
             from .utils import annotate_invoice_calculations
+            import os
+            
             invoice_queryset = annotate_invoice_calculations(
                 Invoice.objects.select_related('client').prefetch_related('payments')
             )
@@ -689,26 +616,27 @@ class PublicInvoicePaymentView(APIView):
             # Calculate the actual amount available for payment
             available_to_pay = invoice.due_balance - pending_payments
             
-            # Only return minimal information needed for payment
+            # Return both invoice details and Stripe key in one response
             data = {
                 'invoice_number': invoice.invoice_number,
                 'client_name': invoice.client.name,
                 'invoice_total': invoice.total_amount,
                 'paid_amount': invoice.paid_amount,
-                'available_to_pay': available_to_pay,  # Renamed from 'amount' for clarity
+                'available_to_pay': available_to_pay,
                 'status': invoice.status,
                 'due_date': invoice.due_date,
                 'pending_payments': pending_payments,
                 'can_pay': (invoice.status in ['PENDING', 'OVERDUE', 'PARTIALLY_PAID'] 
                             and available_to_pay > 0),
-                # Add new fields
                 'days_overdue': invoice.days_overdue,
                 'late_fee_percentage': invoice.late_fee_percentage,
                 'late_fee_amount': invoice.late_fee_amount,
                 'total_with_late_fees': invoice.total_with_late_fees,
                 'allow_partial_payments': invoice.allow_partial_payments,
                 'minimum_payment_amount': invoice.minimum_payment_amount,
-                'payment_progress_percentage': invoice.payment_progress_percentage
+                'payment_progress_percentage': invoice.payment_progress_percentage,
+                # Include Stripe publishable key
+                'publishable_key': os.environ.get('STRIPE_PUBLISHABLE_KEY')
             }
             
             return Response(data)
@@ -724,7 +652,7 @@ class PublicInvoicePaymentView(APIView):
         Create a payment intent for a public invoice payment.
         """
         from .stripe_service import StripeService
-        import os
+        from datetime import timedelta
         
         try:
             # Find the invoice by its public UUID
@@ -744,32 +672,37 @@ class PublicInvoicePaymentView(APIView):
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
-            # Calculate total pending payments
-            pending_payments_total = invoice.payments.filter(status='PENDING').aggregate(
-                total=models.Sum('amount', default=0)
-            )['total']
-            
-            # Calculate the available amount to pay
-            available_to_pay = invoice.due_balance - pending_payments_total
-            
-            if available_to_pay <= 0:
+            # Check if there are any pending payments for this invoice
+            pending_payments_exist = invoice.payments.filter(status='PENDING').exists()
+            if pending_payments_exist:
                 return Response(
-                    {"detail": "This invoice already has pending payments covering the full amount. Please wait for those payments to be processed."},
+                    {"detail": "This invoice already has a pending payment. Please wait for the pending payment to be processed before adding a new payment."},
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
+            # Calculate the amount available to pay
+            amount_to_pay = invoice.due_balance
+            
             # Get requested payment amount from request, default to full available amount
-            requested_amount = request.data.get('amount', available_to_pay)
+            requested_amount = request.data.get('amount', amount_to_pay)
             
             # Validate payment amount
             try:
                 requested_amount = Decimal(str(requested_amount))
                 
+                # Check if payment is too small to be practical (e.g., less than $0.50)
+                # Skip this check for final payments that clear the balance
+                if requested_amount < Decimal('0.50') and requested_amount != amount_to_pay:
+                    return Response(
+                        {"detail": "Payment amount is too small. Minimum payment amount should be at least $0.50 unless it's the final payment that clears the balance."},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+                
                 # Check for partial payment restrictions
-                if requested_amount < available_to_pay:  # This would be a partial payment
+                if requested_amount < amount_to_pay:  # This would be a partial payment
                     if not invoice.allow_partial_payments:
                         return Response(
-                            {"detail": f"This invoice does not allow partial payments. Payment amount must be {available_to_pay}."},
+                            {"detail": f"This invoice does not allow partial payments. Payment amount must be {amount_to_pay}."},
                             status=status.HTTP_400_BAD_REQUEST
                         )
                     
@@ -781,12 +714,40 @@ class PublicInvoicePaymentView(APIView):
                         )
                 
                 # Ensure payment doesn't exceed available amount
-                if requested_amount > available_to_pay:
-                    requested_amount = available_to_pay
+                if requested_amount > amount_to_pay:
+                    requested_amount = amount_to_pay
                 
             except (ValueError, TypeError, DecimalException):
                 return Response(
                     {"detail": "Invalid payment amount"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Check for duplicate payments in the last 24 hours
+            recent_time_24h = timezone.now() - timedelta(hours=24)
+            duplicate_payments = Payment.objects.filter(
+                invoice_id=invoice.id,
+                amount=requested_amount,
+                payment_method='CREDIT_CARD',
+                created_at__gte=recent_time_24h
+            ).exists()
+            
+            if duplicate_payments:
+                return Response(
+                    {"detail": "A payment with the same amount was recently recorded for this invoice. This might be a duplicate payment."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Check for any payments in the last 5 minutes
+            recent_time_5m = timezone.now() - timedelta(minutes=5)
+            recent_payments = Payment.objects.filter(
+                invoice_id=invoice.id,
+                created_at__gte=recent_time_5m
+            ).exists()
+            
+            if recent_payments:
+                return Response(
+                    {"detail": "A payment was recorded for this invoice in the last 5 minutes. Please wait before adding another payment."},
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
@@ -801,9 +762,7 @@ class PublicInvoicePaymentView(APIView):
                 "client_secret": payment_data['client_secret'],
                 "payment_id": payment_data['payment_id'],
                 "amount": requested_amount, 
-                "available_to_pay": available_to_pay,
-                "invoice_number": invoice.invoice_number,
-                "publishable_key": os.environ.get('STRIPE_PUBLISHABLE_KEY')
+                "invoice_number": invoice.invoice_number
             })
             
         except Invoice.DoesNotExist:
