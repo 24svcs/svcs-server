@@ -11,7 +11,7 @@ class ClientSerializer(serializers.ModelSerializer):
     class Meta:
         model = Client
         fields = [
-            'id', 'name', 'email', 'phone', 'company_name', 
+            'id', 'name', 'email', 'phone', 
             'tax_number', 'is_active', 'total_outstanding', 'total_paid', 'address'
         ]
         read_only_fields = ['created_at']
@@ -38,25 +38,30 @@ class CreateClientSerializer(serializers.ModelSerializer):
     id = serializers.IntegerField(read_only=True)
     class Meta:
         model = Client
-        fields = ['id', 'name', 'email', 'phone', 'company_name', 'tax_number', 'is_active']
+        fields = ['id', 'name', 'email', 'phone', 'tax_number', 'is_active']
         
     
     def validate_email(self, value):
         if value and Client.objects.filter(email=value).exclude(id=self.instance.id if self.instance else None).exists():
             raise serializers.ValidationError("This email is already in use")
         return value
+
     
     def create(self, validated_data):
+        if Client.objects.filter(name__iexact=validated_data.get('name'), organization=self.context['organization_id']).exists():
+            raise serializers.ValidationError("This name is already in use")
         organization_id = self.context['organization_id']
         validated_data['organization_id'] = organization_id
         return super().create(validated_data)
     
     
     def update(self, instance, validated_data):
+        if Client.objects.filter(name__iexact=validated_data.get('name'), organization=self.context['organization_id']).exclude(id=instance.id).exists():
+            raise serializers.ValidationError("This name is already in use")
+        
         instance.name = validated_data.get('name', instance.name)
         instance.email = validated_data.get('email', instance.email)
         instance.phone = validated_data.get('phone', instance.phone)
-        instance.company_name = validated_data.get('company_name', instance.company_name)
         instance.tax_number = validated_data.get('tax_number', instance.tax_number)
         instance.is_active = validated_data.get('is_active', instance.is_active)
         instance.save()

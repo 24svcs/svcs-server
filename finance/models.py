@@ -32,10 +32,9 @@ class Client(models.Model):
     Contains basic information and relationships to invoices and payments.
     """
     organization = models.ForeignKey(Organization, models.CASCADE, related_name='clients')
-    name = models.CharField(max_length=200)
+    name = models.CharField(max_length=200, unique=True)
     email = models.EmailField(null=True, blank=True)
     phone = PhoneNumberField(unique=True)
-    company_name = models.CharField(max_length=200, blank=True)
     tax_number = models.CharField(max_length=50, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -73,8 +72,14 @@ class Client(models.Model):
         return total_invoice_amount - self.total_paid
     
     class Meta:
-        ordering = ['name', 'company_name']
-
+        ordering = ['name']
+        indexes = [
+            models.Index(fields=['name']),
+            models.Index(fields=['email']),
+            models.Index(fields=['phone']),
+        ]
+        
+    
 
 class Invoice(models.Model):
     """

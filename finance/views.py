@@ -45,8 +45,8 @@ class ClientModelViewset(ModelViewSet):
     pagination_class = DefaultPagination
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
     filterset_class = ClientFilter
-    search_fields = ['name__istartswith', 'email__istartswith', 'phone__exact', 'company_name__istartswith', 'tax_number__istartswith']
-    ordering_fields = ['name', 'email', 'phone', 'company_name', 'tax_number']
+    search_fields = ['name__istartswith', 'email__istartswith', 'phone__exact', 'tax_number__istartswith']
+    ordering_fields = ['name']
 
     permission_classes = [IsAuthenticated]
     
