@@ -4,8 +4,7 @@ import logging
 from decimal import Decimal, DecimalException
 
 
-from .serializers import (
-    Client, ClientSerializer, CreateClientSerializer,
+from .serializer import (
     Invoice, InvoiceSerializer, CreateInvoiceSerializer, UpdateInvoiceSerializer,
     Payment, PaymentSerializer, CreatePaymentSerializer, UpdatePaymentSerializer,
     InvoiceItem, BulkInvoiceItemSerializer,
@@ -27,10 +26,17 @@ from rest_framework import filters
 from .utils import annotate_invoice_calculations, calculate_payment_statistics
 from api.throttling import BurstRateThrottle, SustainedRateThrottle
 import uuid
-from .serializers import ClientAddressSerializer, Address
 from rest_framework.views import APIView
 from django.http import HttpResponse
 from rest_framework.permissions import AllowAny
+from django.db.models import F, Prefetch
+from finance.serializers.client_serializers import  Client, ClientSerializer, CreateClientSerializer
+from finance.serializers.address_serializers import (
+    Address,
+    AddressSerializer,
+    CreateAddressSerializer,
+    UpdateAddressSerializer
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,21 +51,10 @@ class ClientModelViewset(ModelViewSet):
     permission_classes = [IsAuthenticated]
     
     def get_queryset(self):
-        from django.db.models import Prefetch
-        
-        # Optimize invoice queries with their items
-        invoice_queryset = Invoice.objects.prefetch_related(
-            'items'
-        )
-        
-        # Optimize payment queries 
-        payment_queryset = Payment.objects.select_related('invoice')
-        
-        address_queryset = Address.objects.select_related('client') 
-        
         return Client.objects.prefetch_related(
-            Prefetch('invoices', queryset=invoice_queryset),
-            Prefetch('payments', queryset=payment_queryset),
+            Prefetch('payments', queryset=Payment.objects.select_related('invoice')),
+            Prefetch('invoices', queryset=Invoice.objects.prefetch_related('items')),
+            Prefetch('addresses', queryset=Address.objects.all())
         ).filter(organization_id=self.kwargs['organization_pk'])
     
     serializer_class = ClientSerializer
@@ -67,7 +62,7 @@ class ClientModelViewset(ModelViewSet):
     def get_serializer_class(self):
         if self.request.method in ['POST', 'PUT', 'PATCH']:
             return CreateClientSerializer
-        return super().get_serializer_class()
+        return ClientSerializer
     
     def get_serializer_context(self):
         context = super().get_serializer_context()
@@ -108,11 +103,18 @@ class ClientModelViewset(ModelViewSet):
 # ================================ Client Address Viewset ================================
    
 class ClientAddressViewSet(ModelViewSet):
-    serializer_class = ClientAddressSerializer
+    serializer_class = AddressSerializer
     permission_classes = [IsAuthenticated]
     
     def get_queryset(self):
         return Address.objects.filter(client_id=self.kwargs['client_pk'])
+    
+    def get_serializer_class(self):
+        if self.request.method in ['POST']:
+            return CreateAddressSerializer
+        elif self.request.method in ['PUT', 'PATCH']:
+            return UpdateAddressSerializer
+        return AddressSerializer
     
     def get_serializer_context(self):
         context = super().get_serializer_context()

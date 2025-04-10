@@ -2,91 +2,10 @@ from rest_framework import serializers
 from decimal import Decimal
 from django.utils import timezone
 from django.db import transaction
-from .models import Client, Invoice, InvoiceItem, Payment, RecurringInvoice, RecurringInvoiceItem, Address
+from .models import Client, Invoice, InvoiceItem, Payment, RecurringInvoice, RecurringInvoiceItem
 import uuid
 from decimal import DecimalException
-from api.libs import validate_phone
-from phonenumber_field.modelfields import PhoneNumberField
 from .utils import annotate_invoice_calculations
-from django_countries.fields import CountryField
-from django.db import models
-
-
-
-class ClientAddressSerializer(serializers.ModelSerializer):
-    country = CountryField()
-
-    
-    class Meta:
-        model = Address
-        fields = ['id', 'street', 'city', 'state', 'zip_code', 'country']
-        
-    def create(self, validated_data):
-        client_id = self.context['client_id']
-
-        return Address.objects.create(client_id=client_id, **validated_data)
-
-
-
-
-class ClientSerializer(serializers.ModelSerializer):
-    total_paid = serializers.SerializerMethodField()
-    total_outstanding = serializers.SerializerMethodField()
-    address = serializers.SerializerMethodField()
-    
-    class Meta:
-        model = Client
-        fields = [
-            'id', 'name', 'email', 'phone', 'company_name', 
-            'tax_number', 'is_active', 'total_paid', 
-            'total_outstanding', 'address', 'created_at',
-        ]
-        read_only_fields = ['created_at']
-    
-    def get_total_paid(self, obj):
-        return obj.total_paid
-    
-    def get_total_outstanding(self, obj):
-        return obj.total_outstanding
-    
-    def get_address(self, obj):
-        address = obj.addresses.first()
-        if address:
-            return f"{address.street}, {address.city}, {address.state} {address.zip_code}, {address.country}"
-        return None
-
-
-# <================================> Client Serializers <==========================================>
-
-class CreateClientSerializer(serializers.ModelSerializer):
-    phone  =  PhoneNumberField(validators=[validate_phone.validate_phone])
-    class Meta:
-        model = Client
-        fields = ['name', 'email', 'phone', 'company_name', 'tax_number', 'is_active']
-        
-    
-    def validate_email(self, value):
-        if value and Client.objects.filter(email=value).exclude(id=self.instance.id if self.instance else None).exists():
-            raise serializers.ValidationError("This email is already in use")
-        return value
-    
-    def create(self, validated_data):
-        organization_id = self.context['organization_id']
-        validated_data['organization_id'] = organization_id
-        return super().create(validated_data)
-    
-    
-    def update(self, instance, validated_data):
-        instance.name = validated_data.get('name', instance.name)
-        instance.email = validated_data.get('email', instance.email)
-        instance.phone = validated_data.get('phone', instance.phone)
-        instance.company_name = validated_data.get('company_name', instance.company_name)
-        instance.tax_number = validated_data.get('tax_number', instance.tax_number)
-        instance.is_active = validated_data.get('is_active', instance.is_active)
-        instance.save()
-        return instance
-    
-
 
 
 # ================================ Invoice Item Serializers ================================

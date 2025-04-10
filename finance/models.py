@@ -92,7 +92,7 @@ class Invoice(models.Model):
     
     uuid = models.UUIDField(default=uuid.uuid4, editable=False, unique=True)
     organization = models.ForeignKey(Organization, models.CASCADE, related_name='invoices')
-    client = models.ForeignKey(Client, on_delete=models.CASCADE, related_name='invoices')
+    client = models.ForeignKey(Client, on_delete=models.PROTECT, related_name='invoices')
     invoice_number = models.CharField(max_length=50, unique=True)
     issue_date = models.DateField()
     due_date = models.DateField()
@@ -347,7 +347,7 @@ class Payment(models.Model):
 
     organization = models.ForeignKey(Organization, models.CASCADE, related_name='payments')
     client = models.ForeignKey(Client, on_delete=models.PROTECT, related_name='payments')
-    invoice = models.ForeignKey(Invoice, on_delete=models.CASCADE, related_name='payments')
+    invoice = models.ForeignKey(Invoice, on_delete=models.PROTECT, related_name='payments')
     amount = models.DecimalField(
         max_digits=10, 
         decimal_places=2, 
