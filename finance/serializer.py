@@ -37,7 +37,6 @@ class SimpleInvoiceItemSerializer(serializers.ModelSerializer):
         fields = ['id', 'product', 'unit_price', 'quantity']
     
 
-
 # ================================ Payment Serializers ================================
 class PaymentSerializer(serializers.ModelSerializer):
     invoice_number = serializers.CharField(source='invoice.invoice_number', read_only=True)
@@ -97,10 +96,10 @@ class CreatePaymentSerializer(serializers.ModelSerializer):
         ).get()
         
         # Check if invoice can accept payments
-        if invoice.status not in ['PENDING', 'OVERDUE', 'PARTIALLY_PAID']:
+        if invoice.status not in ['SENT', 'OVERDUE', 'PARTIALLY_PAID']:
             raise serializers.ValidationError({
                 "invoice_id": f"Cannot add payment to invoice in {invoice.status} status. "
-                "Invoice must be PENDING, OVERDUE, or PARTIALLY_PAID"
+                "Invoice must be SENT, OVERDUE, or PARTIALLY_PAID"
             })
             
         # Check if there are any pending payments for this invoice
@@ -303,7 +302,7 @@ class CreateInvoiceSerializer(serializers.ModelSerializer):
             client = Client.objects.filter(
                 id=value,
                 organization_id=organization_id,
-                is_active=True
+                status=Client.ACTIVE 
             ).first()
             
             if not client:
@@ -435,7 +434,7 @@ class UpdateInvoiceSerializer(serializers.ModelSerializer):
     
     def validate(self, data):
         # Check if invoice is in an editable state
-        editable_states = ['DRAFT', 'PENDING']
+        editable_states = ['DRAFT']
         if self.instance.status not in editable_states:
             raise serializers.ValidationError({
                 "non_field_errors": f"Cannot modify invoice in {self.instance.status} status. Only invoices in these states can be modified: {', '.join(editable_states)}"
@@ -500,15 +499,15 @@ class UpdateInvoiceSerializer(serializers.ModelSerializer):
         items_data = validated_data.pop('items', None)
         
         if items_data is not None:
-            # Delete existing items only if invoice is in DRAFT or PENDING status
-            if instance.status in ['DRAFT', 'PENDING']:
+            # Delete existing items only if invoice is in DRAFT status
+            if instance.status in ['DRAFT']:
                 instance.items.all().delete()
                 # Create new items
                 for item_data in items_data:
                     InvoiceItem.objects.create(invoice=instance, **item_data)
             else:
                 raise serializers.ValidationError({
-                    "items": "Cannot modify items for invoices not in DRAFT or PENDING status"
+                    "items": "Cannot modify items for invoices not in DRAFT status"
                 })
         
         # Update invoice fields
@@ -524,58 +523,38 @@ class UpdateInvoiceSerializer(serializers.ModelSerializer):
 class UpdatePaymentSerializer(serializers.ModelSerializer):
     class Meta:
         model = Payment
-        fields = ['status']
-        read_only_fields = ['amount', 'payment_date', 'payment_method', 'transaction_id', 'notes']
+        fields = ['payment_method']
+        read_only_fields = ['amount', 'payment_date', 'notes', 'transaction_id', 'status']
     
-    def validate_status(self, value):
-        current_status = self.instance.status
-        payment_method = self.instance.payment_method
-        
-        # Get user from context
-        request = self.context.get('request')
-        user = request.user if request else None
-        
-        # Prevent manual status changes for credit card payments
-        # Only Stripe webhooks should update credit card payments
-        if payment_method == 'CREDIT_CARD' and not user.is_superuser:
+    def validate_payment_method(self, value):
+        allowed_methods = ['CASH', 'BANK_TRANSFER']
+        if value not in allowed_methods:
             raise serializers.ValidationError(
-                "Credit card payment status cannot be changed manually. "
-                "Status updates for credit card payments are handled automatically."
+                f"Only manual payment methods ({', '.join(allowed_methods)}) are allowed. "
+                "Other payment types must be processed through their respective payment gateways."
             )
-        
-        # Check permissions for manual status updates
-        if not user.has_perm('finance.change_payment_status'):
-            raise serializers.ValidationError(
-                "You don't have permission to change payment status."
-            )
-        
-        # Define valid status transitions
-        VALID_TRANSITIONS = {
-            'PENDING': ['COMPLETED', 'FAILED'],  # Pending can move to completed or failed
-            'COMPLETED': ['REFUNDED'],           # Completed can only be refunded
-            'FAILED': [],                        # Failed is terminal state
-            'REFUNDED': []                       # Refunded is terminal state
-        }
-        
-        # Check if the current status can transition to the new status
-        if value not in VALID_TRANSITIONS.get(current_status, []):
-            raise serializers.ValidationError(
-                f"Cannot change status from {current_status} to {value}. "
-                f"Valid transitions are: {', '.join(VALID_TRANSITIONS[current_status])}"
-            )
-        
         return value
     
-    def update(self, instance, validated_data):
-        new_status = validated_data.get('status')
+    def validate(self, data):
+        # Get the current payment instance
+        payment = self.instance
         
+        # Define allowed manual payment methods
+        allowed_methods = ['CASH', 'BANK_TRANSFER']
+        
+        # Check if the original payment method is not a manual method
+        if payment.payment_method not in allowed_methods:
+            raise serializers.ValidationError({
+                "error": "Only payments made with manual payment methods (CASH, BANK_TRANSFER) can be modified. "
+                "Other payment types must be processed through their respective payment gateways."
+            })
+        
+        return data
+    
+    def update(self, instance, validated_data):
         with transaction.atomic():
-            # Update payment status
-            instance.status = new_status
+            instance.payment_method = validated_data['payment_method']
             instance.save()
-            
-            # Update invoice status
-            instance.invoice.update_status_based_on_payments()
             
             return instance
         

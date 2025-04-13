@@ -54,31 +54,20 @@ def annotate_invoice_calculations(queryset):
     )
 
 
-def calculate_payment_statistics(queryset, days_ago=30):
+def calculate_payment_statistics(queryset):
     """
     Calculate statistics for payment data.
     
     Args:
         queryset: The Payment queryset to analyze
-        days_ago: Number of days to look back for recent statistics
         
     Returns:
         Dictionary with payment statistics
     """
-    from django.utils import timezone
-    from datetime import timedelta
-    from django.db.models import Count
-    
-    current_date = timezone.now()
-    period_start = current_date - timedelta(days=days_ago)
     
     return queryset.aggregate(
-        total_payments=Count('id'),
-        total_amount=Sum('amount', default=0),
-        completed_payments=Count('id', filter=Q(status='COMPLETED')),
-        pending_payments=Count('id', filter=Q(status='PENDING')),
-        failed_payments=Count('id', filter=Q(status='FAILED')),
-        refunded_payments=Count('id', filter=Q(status='REFUNDED')),
-        payments_in_period=Count('id', filter=Q(created_at__gte=period_start)),
-        amount_in_period=Sum('amount', filter=Q(created_at__gte=period_start), default=0)
+        completed_payments=Sum('amount', filter=Q(status='COMPLETED'), default=0),
+        pending_payments=Sum('amount', filter=Q(status='PENDING'), default=0),
+        failed_payments=Sum('amount', filter=Q(status='FAILED'), default=0),
+        refunded_payments=Sum('amount', filter=Q(status='REFUNDED'), default=0),
     ) 

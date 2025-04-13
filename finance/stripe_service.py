@@ -88,7 +88,7 @@ class StripeService:
             
             # Calculate amount in cents (Stripe uses smallest currency unit)
             # For USD, that's cents, so we multiply by 100
-            amount_in_cents = int(payment_amount * 100)
+            amount_in_cents = int((payment_amount.quantize(Decimal('0.01')) * 100))
             
             # Create payment intent
             intent = stripe.PaymentIntent.create(

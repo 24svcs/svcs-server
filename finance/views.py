@@ -1,5 +1,5 @@
 from rest_framework.viewsets import ModelViewSet, GenericViewSet
-from rest_framework.mixins import CreateModelMixin, DestroyModelMixin
+from rest_framework.mixins import CreateModelMixin, DestroyModelMixin, UpdateModelMixin, ListModelMixin, RetrieveModelMixin
 import logging
 from decimal import Decimal, DecimalException
 
@@ -14,7 +14,7 @@ from .serializer import (
 from rest_framework.permissions import IsAuthenticated
 from api.pagination import DefaultPagination
 from django_filters.rest_framework import DjangoFilterBackend
-from .filters import ClientFilter, InvoiceFilter
+from .filters import ClientFilter, InvoiceFilter, PaymentFilter
 from django.db import models, transaction
 from django.db.models import Q, Sum, Count
 from rest_framework.response import Response
@@ -30,7 +30,7 @@ from rest_framework.views import APIView
 from django.http import HttpResponse
 from rest_framework.permissions import AllowAny
 from django.db.models import F, Prefetch
-from finance.serializers.client_serializers import  Client, ClientSerializer, CreateClientSerializer
+from finance.serializers.client_serializers import  Client, ClientSerializer, CreateClientSerializer, UpdateClientSerializer
 from finance.serializers.address_serializers import (
     Address,
     AddressSerializer,
@@ -45,7 +45,7 @@ class ClientModelViewset(ModelViewSet):
     pagination_class = DefaultPagination
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
     filterset_class = ClientFilter
-    search_fields = ['name__istartswith', 'email__istartswith', 'phone__exact', 'tax_number__istartswith']
+    search_fields = ['name__istartswith', 'email__istartswith', 'phone__exact', 'tax_number__exact']
     ordering_fields = ['name']
 
     permission_classes = [IsAuthenticated]
@@ -54,20 +54,33 @@ class ClientModelViewset(ModelViewSet):
         return Client.objects.prefetch_related(
             Prefetch('payments', queryset=Payment.objects.select_related('invoice')),
             Prefetch('invoices', queryset=Invoice.objects.prefetch_related('items')),
-            Prefetch('addresses', queryset=Address.objects.all())
+            # Prefetch('addresses', queryset=Address.objects.all())
         ).filter(organization_id=self.kwargs['organization_pk'])
     
     serializer_class = ClientSerializer
     
     def get_serializer_class(self):
-        if self.request.method in ['POST', 'PUT', 'PATCH']:
+        if self.request.method in ['POST']:
             return CreateClientSerializer
+        elif self.request.method in ['PUT', 'PATCH']:
+            return UpdateClientSerializer
         return ClientSerializer
     
     def get_serializer_context(self):
         context = super().get_serializer_context()
         context['organization_id'] = self.kwargs['organization_pk']
         return context
+    
+    
+    def destroy(self, request, *args, **kwargs):
+        client = self.get_object()
+        if client.invoices.exists():
+            return Response(
+                {"detail": "Client has invoices. Please delete or transfer them first."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        client.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
     def list(self, request, *args, **kwargs):
         queryset = self.filter_queryset(self.get_queryset())
@@ -83,8 +96,9 @@ class ClientModelViewset(ModelViewSet):
             # Calculate statistics
             stats = Client.objects.filter(organization_id=self.kwargs['organization_pk']).aggregate(
                 total_clients=models.Count('id'),
-                active_clients=models.Count('id', filter=models.Q(is_active=True)),
-                inactive_clients=models.Count('id', filter=models.Q(is_active=False)),
+                active_clients=models.Count('id', filter=models.Q(status=Client.ACTIVE)),
+                inactive_clients=models.Count('id', filter=models.Q(status=Client.INACTIVE)),
+                banned_clients=models.Count('id', filter=models.Q(status=Client.BANNED)),
                 new_clients_30d=models.Count('id', filter=models.Q(created_at__gte=thirty_days_ago)),
                 clients_with_outstanding_balance=models.Count(
                     'id',
@@ -126,7 +140,13 @@ class ClientAddressViewSet(ModelViewSet):
     
 # ================================ Invoice Viewset ================================
 
-class InvoiceViewSet(ModelViewSet):
+class InvoiceViewSet(
+    GenericViewSet,
+    CreateModelMixin,
+    UpdateModelMixin,
+    ListModelMixin,
+    RetrieveModelMixin
+):
     pagination_class = DefaultPagination
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     search_fields = [
@@ -180,7 +200,7 @@ class InvoiceViewSet(ModelViewSet):
             ).aggregate(
                 total_invoices=Count('id'),
                 draft_invoices=Count('id', filter=Q(status='DRAFT')),
-                pending_invoices=Count('id', filter=Q(status='PENDING')),
+                pending_invoices=Count('id', filter=Q(status='SENT')),
                 paid_invoices=Count('id', filter=Q(status='PAID')),
                 overdue_invoices=Count('id', filter=Q(status='OVERDUE')),
                 partially_paid=Count('id', filter=Q(status='PARTIALLY_PAID')),
@@ -204,7 +224,7 @@ class InvoiceViewSet(ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        if invoice.status not in ['PENDING', 'OVERDUE', 'PARTIALLY_PAID']:
+        if invoice.status not in ['SENT', 'OVERDUE', 'PARTIALLY_PAID']:
             return Response(
                 {"detail": f"Cannot send reminder for invoice in {invoice.status} status."},
                 status=status.HTTP_400_BAD_REQUEST
@@ -248,7 +268,7 @@ class InvoiceViewSet(ModelViewSet):
         try:
             with transaction.atomic():
                 # Update invoice status
-                invoice.status = 'PENDING'
+                invoice.status = 'SENT'
                 invoice.save()
             
                 serializer = self.get_serializer(invoice)
@@ -267,13 +287,20 @@ class InvoiceViewSet(ModelViewSet):
             
 # ================================ Payment Viewset ================================
     
-class PaymentViewSet(ModelViewSet):
+class PaymentViewSet(
+    GenericViewSet,
+    CreateModelMixin,
+    UpdateModelMixin,
+    ListModelMixin,
+    RetrieveModelMixin
+    ):
     pagination_class = DefaultPagination
     permission_classes = [IsAuthenticated]
-    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
-    search_fields = ['invoice__invoice_number', 'client__name', 'transaction_id']
+    filterset_class = PaymentFilter 
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter]
+    search_fields = ['invoice__invoice_number', 'client__name']
     ordering_fields = ['payment_date', 'amount', 'status', 'created_at']
-    ordering = ['-created_at']  # Default ordering
+    ordering = ['-created_at'] 
     throttle_classes = [BurstRateThrottle, SustainedRateThrottle]
     
     def get_queryset(self):
@@ -317,6 +344,73 @@ class PaymentViewSet(ModelViewSet):
         serializer = self.get_serializer(queryset, many=True)
         return Response(serializer.data)
     
+    def update(self, request, *args, **kwargs):
+        """
+        Only allow updating payment method for completed payments.
+        For any other changes, the payment must be cancelled first.
+        """
+        payment = self.get_object()
+        
+        # Only allow updates for completed payments
+        if payment.status != 'COMPLETED':
+            return Response(
+                {"detail": "Only completed payments can be updated"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+            
+        # Only allow updating payment method
+        if len(request.data) > 1 or 'payment_method' not in request.data:
+            return Response(
+                {"detail": "Only payment method can be updated for completed payments. For other changes, please cancel the payment first."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+            
+        return super().update(request, *args, **kwargs)
+    
+    @action(detail=True, methods=['post'])
+    def cancel(self, request, organization_pk=None, pk=None):
+        """
+        Cancel a payment and delete it, reverting the invoice to its previous state.
+        Only manual payments (CASH, BANK_TRANSFER) can be cancelled.
+        Other payment types must be refunded instead.
+        """
+        payment = self.get_object()
+        
+        # Only allow cancelling completed payments
+        if payment.status != 'COMPLETED':
+            return Response(
+                {"detail": "Can only cancel completed payments"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+            
+        # Only allow cancelling manual payments
+        if payment.payment_method not in ['CASH', 'BANK_TRANSFER']:
+            return Response(
+                {"detail": f"Cannot cancel {payment.payment_method} payments. Please use the refund action instead."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+            
+        try:
+            with transaction.atomic():
+                # Store invoice reference before deleting payment
+                invoice = payment.invoice
+                
+                # Delete the payment
+                payment.delete()
+                
+                # Update invoice status
+                invoice.update_status_based_on_payments()
+                
+                return Response(
+                    {"detail": "Payment cancelled successfully"},
+                    status=status.HTTP_200_OK
+                )
+                
+        except Exception as e:
+            return Response(
+                {"detail": f"Failed to cancel payment: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
     
     @action(detail=True, methods=['post'])
     def refund(self, request, organization_pk=None, pk=None):

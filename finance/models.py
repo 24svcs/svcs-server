@@ -31,14 +31,27 @@ class Client(models.Model):
     Client model representing customers in the system.
     Contains basic information and relationships to invoices and payments.
     """
+    
+    ACTIVE = 'ACTIVE'
+    INACTIVE = 'INACTIVE'
+    BANNED = 'BANNED'
+    
+    MEMBER_STATUS_CHOICES = [
+        (ACTIVE, 'Active'),
+        (INACTIVE, 'Inactive'),
+        (BANNED, 'Banned'),
+
+    ]
+    
+    
     organization = models.ForeignKey(Organization, models.CASCADE, related_name='clients')
-    name = models.CharField(max_length=200, unique=True)
+    name = models.CharField(max_length=200)
     email = models.EmailField(null=True, blank=True)
-    phone = PhoneNumberField(unique=True)
+    phone = PhoneNumberField()
     tax_number = models.CharField(max_length=50, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-    is_active = models.BooleanField(default=True)
+    status = models.CharField(max_length=20, choices=MEMBER_STATUS_CHOICES, default=ACTIVE)
     stripe_customer_id = models.CharField(max_length=100, blank=True, null=True)
 
     def __str__(self):
@@ -77,6 +90,7 @@ class Client(models.Model):
             models.Index(fields=['name']),
             models.Index(fields=['email']),
             models.Index(fields=['phone']),
+            models.Index(fields=['status'])
         ]
         
     
@@ -88,7 +102,7 @@ class Invoice(models.Model):
     """
     STATUS_CHOICES = [
         ('DRAFT', 'Draft'),
-        ('PENDING', 'Pending'),
+        ('SENT', 'Sent'),
         ('PAID', 'Paid'),
         ('OVERDUE', 'Overdue'),
         ('CANCELLED', 'Cancelled'),
@@ -148,7 +162,7 @@ class Invoice(models.Model):
             items_total = sum(item.amount for item in self._prefetched_objects_cache['items'])
         else:
             items_total = sum(item.amount for item in self.items.all())
-        return items_total * self.tax_rate / 100
+        return (items_total * self.tax_rate / 100).quantize(Decimal('0.01'))
     
     @property
     def total_amount(self):
@@ -158,7 +172,7 @@ class Invoice(models.Model):
             items_total = sum(item.amount for item in self._prefetched_objects_cache['items'])
         else:
             items_total = sum(item.amount for item in self.items.all())
-        return items_total + (items_total * self.tax_rate / 100)
+        return (items_total + (items_total * self.tax_rate / 100)).quantize(Decimal('0.01'))
     
     @property
     def paid_amount(self):
@@ -205,7 +219,7 @@ class Invoice(models.Model):
             return
             
         # Calculate totals using direct database queries to avoid caching issues
-        total_amount = self.total_amount
+        total_amount = self.total_amount 
         
         # Fetch the payments directly from the database to ensure fresh data
         completed_payments = self.payments.filter(status='COMPLETED').aggregate(
@@ -221,7 +235,7 @@ class Invoice(models.Model):
         
         if completed_payments >= total_amount:
             self.status = 'PAID'
-        elif completed_payments > 0:
+        elif completed_payments > 0 and self.due_date > timezone.now().date():
             self.status = 'PARTIALLY_PAID'
         elif self.due_date < timezone.now().date():
             self.status = 'OVERDUE'
@@ -230,7 +244,7 @@ class Invoice(models.Model):
             if old_status != 'OVERDUE' and not self.late_fee_applied and self.late_fee_percentage > 0:
                 self.apply_late_fee()
         else:
-            self.status = 'PENDING'
+            self.status = 'SENT'
             
         # Only save if status actually changed
         if old_status != self.status:
@@ -326,7 +340,7 @@ class InvoiceItem(models.Model):
     @property
     def amount(self):
         """Calculate the line item total (quantity * unit_price)."""
-        return self.quantity * self.unit_price
+        return (self.quantity * self.unit_price).quantize(Decimal('0.01'))
 
 class Payment(models.Model):
     """
@@ -530,4 +544,4 @@ class RecurringInvoiceItem(models.Model):
     @property
     def amount(self):
         """Calculate the line item total (quantity * unit_price)."""
-        return self.quantity * self.unit_price
+        return (self.quantity * self.unit_price).quantize(Decimal('0.01'))

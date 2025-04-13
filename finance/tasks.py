@@ -10,14 +10,15 @@ logger = logging.getLogger(__name__)
 def process_overdue_invoices():
     """
     Process all overdue invoices:
-    1. Change status from PENDING to OVERDUE for past due invoices
+    1. Change status to OVERDUE for past due invoices in non-final statuses
     2. Apply late fees for overdue invoices that haven't had fees applied yet
     """
     today = timezone.now().date()
     
     # Find invoices that are past due but not marked as overdue yet
+    # Check all non-final statuses: SENT, PARTIALLY_PAID
     pending_overdue_invoices = Invoice.objects.filter(
-        status='PENDING',
+        status__in=['SENT', 'PARTIALLY_PAID'],
         due_date__lt=today
     )
     
@@ -53,20 +54,21 @@ def process_overdue_invoices():
         late_fee_percentage__gt=0
     )
     
-    logger.info(f"Found {overdue_invoices.count()} existing overdue invoices eligible for late fees")
+    logger.info(f"Found {overdue_invoices.count()} overdue invoices that need late fees")
     
-    # Apply late fees to already overdue invoices
+    # Apply late fees to overdue invoices
     for invoice in overdue_invoices:
         try:
-            if invoice.apply_late_fee():
-                logger.info(f"Applied late fee of {invoice.late_fee_amount} to existing overdue invoice {invoice.invoice_number}")
-                late_fees_count += 1
+            with transaction.atomic():
+                if invoice.apply_late_fee():
+                    logger.info(f"Applied late fee of {invoice.late_fee_amount} to invoice {invoice.invoice_number}")
+                    late_fees_count += 1
         except Exception as e:
             logger.error(f"Error applying late fee to invoice {invoice.invoice_number}: {str(e)}")
     
     return {
-        "overdue_updates": overdue_count,
-        "late_fees_applied": late_fees_count
+        'overdue_count': overdue_count,
+        'late_fees_count': late_fees_count
     }
 
 @shared_task

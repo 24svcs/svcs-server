@@ -145,8 +145,6 @@ MONCASH = {
 
 CELERY_BEAT_SCHEDULE = {
     'generate_attendance_reports': {
-        },
-    'generate_attendance_reports': {
         'task': 'api.jobs.generate_attendance_report.generate_attendance_reports',
         'schedule': crontab(hour='*/1'),
         'args': ()
@@ -163,7 +161,7 @@ CELERY_BEAT_SCHEDULE = {
     # New tasks for invoice enhancements
     'process_overdue_invoices': {
         'task': 'finance.tasks.process_overdue_invoices',
-        'schedule': crontab(hour=1, minute=0),  # Run daily at 1 AM
+        'schedule': crontab(hour='*/4'),  # Run every 4 hours
         'args': ()
     },
     'send_payment_reminders': {

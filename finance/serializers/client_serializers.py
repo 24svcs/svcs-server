@@ -6,13 +6,12 @@ from phonenumber_field.modelfields import PhoneNumberField
 class ClientSerializer(serializers.ModelSerializer):
     total_paid = serializers.SerializerMethodField()
     total_outstanding = serializers.SerializerMethodField()
-    address = serializers.SerializerMethodField()
     
     class Meta:
         model = Client
         fields = [
             'id', 'name', 'email', 'phone', 
-            'tax_number', 'is_active', 'total_outstanding', 'total_paid', 'address'
+            'tax_number', 'status', 'total_outstanding', 'total_paid', 
         ]
         read_only_fields = ['created_at']
     
@@ -22,14 +21,6 @@ class ClientSerializer(serializers.ModelSerializer):
     def get_total_outstanding(self, obj):
         return obj.total_outstanding
     
-    def get_address(self, obj):
-        if hasattr(obj, '_prefetched_objects_cache') and 'addresses' in obj._prefetched_objects_cache:
-            addresses = obj._prefetched_objects_cache['addresses']
-            if addresses:
-                address = addresses[0]  # Get the first address
-                return f"{address.street}, {address.city}, {address.state} {address.zip_code}, {address.country}"
-        return None
-
 
 # <================================> Client Serializers <==========================================>
 
@@ -38,7 +29,7 @@ class CreateClientSerializer(serializers.ModelSerializer):
     id = serializers.IntegerField(read_only=True)
     class Meta:
         model = Client
-        fields = ['id', 'name', 'email', 'phone', 'tax_number', 'is_active']
+        fields = ['id', 'name', 'email', 'phone', 'tax_number', 'status']
         
     
     def validate_email(self, value):
@@ -55,18 +46,28 @@ class CreateClientSerializer(serializers.ModelSerializer):
         return super().create(validated_data)
     
     
-    def update(self, instance, validated_data):
-        if Client.objects.filter(name__iexact=validated_data.get('name'), organization=self.context['organization_id']).exclude(id=instance.id).exists():
-            raise serializers.ValidationError("This name is already in use")
-        
-        instance.name = validated_data.get('name', instance.name)
-        instance.email = validated_data.get('email', instance.email)
-        instance.phone = validated_data.get('phone', instance.phone)
-        instance.tax_number = validated_data.get('tax_number', instance.tax_number)
-        instance.is_active = validated_data.get('is_active', instance.is_active)
-        instance.save()
-        return instance
+
+
+class UpdateClientSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Client
+        fields = ['id', 'name', 'email', 'phone', 'tax_number', 'status']
     
+    def validate_email(self, value):
+        if value and Client.objects.filter(email=value, organization=self.instance.organization).exclude(id=self.instance.id).exists():
+            raise serializers.ValidationError("This email is already in use")
+        return value
+    
+    def validate_name(self, value):
+        if value and Client.objects.filter(name__iexact=value, organization=self.instance.organization).exclude(id=self.instance.id).exists():
+            raise serializers.ValidationError("This name is already in use")
+        return value
+    
+    def validate_phone(self, value):
+        if value and Client.objects.filter(phone=value, organization=self.instance.organization).exclude(id=self.instance.id).exists():
+            raise serializers.ValidationError("This phone number is already in use")
+        return value
+
 
     
 
