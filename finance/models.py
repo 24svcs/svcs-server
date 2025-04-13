@@ -130,6 +130,12 @@ class Invoice(models.Model):
         editable=False,
         help_text="Whether late fee has been applied"
     )
+    late_fee_amount = models.DecimalField(
+        max_digits=10, decimal_places=2,
+        default=Decimal('0.00'),
+        editable=False,
+        help_text="Late fee amount"
+    )
     last_reminder_date = models.DateField(
         null=True, blank=True,
         editable=False,
@@ -164,15 +170,27 @@ class Invoice(models.Model):
             items_total = sum(item.amount for item in self.items.all())
         return (items_total * self.tax_rate / 100).quantize(Decimal('0.01'))
     
+    
+    
     @property
     def total_amount(self):
-        """Calculate the total invoice amount including tax."""
+        """Calculate the total invoice amount including tax and late fees."""
         # Using prefetched items if available
         if hasattr(self, '_prefetched_objects_cache') and 'items' in self._prefetched_objects_cache:
             items_total = sum(item.amount for item in self._prefetched_objects_cache['items'])
         else:
             items_total = sum(item.amount for item in self.items.all())
-        return (items_total + (items_total * self.tax_rate / 100)).quantize(Decimal('0.01'))
+        
+        # Calculate base total with tax
+        base_total = (items_total + (items_total * self.tax_rate / 100)).quantize(Decimal('0.01'))
+        
+        # Add late fee if applicable
+        if self.status == 'OVERDUE' and self.late_fee_applied and self.late_fee_percentage > 0:
+            # Calculate late fee based on the base total minus paid amount
+            unpaid_base = base_total - self.paid_amount
+            return base_total + self.late_fee_amount
+        
+        return base_total
     
     @property
     def paid_amount(self):
@@ -219,7 +237,7 @@ class Invoice(models.Model):
             return
             
         # Calculate totals using direct database queries to avoid caching issues
-        total_amount = self.total_amount 
+        total_amount = self.total_amount
         
         # Fetch the payments directly from the database to ensure fresh data
         completed_payments = self.payments.filter(status='COMPLETED').aggregate(
@@ -242,7 +260,22 @@ class Invoice(models.Model):
             
             # Check if we should apply late fee when status changes to OVERDUE
             if old_status != 'OVERDUE' and not self.late_fee_applied and self.late_fee_percentage > 0:
-                self.apply_late_fee()
+                # Calculate base total without late fees
+                if hasattr(self, '_prefetched_objects_cache') and 'items' in self._prefetched_objects_cache:
+                    items_total = sum(item.amount for item in self._prefetched_objects_cache['items'])
+                else:
+                    items_total = sum(item.amount for item in self.items.all())
+                
+                base_total = (items_total + (items_total * self.tax_rate / 100)).quantize(Decimal('0.01'))
+                unpaid_base = base_total - completed_payments
+                
+                # Calculate and set late fee amount
+                self.late_fee_amount = (unpaid_base * self.late_fee_percentage / 100).quantize(Decimal('0.01'))
+                self.late_fee_applied = True
+                
+                # Save both fields in a single update
+                self.save(update_fields=['status', 'late_fee_amount', 'late_fee_applied'])
+                return
         else:
             self.status = 'SENT'
             
@@ -278,17 +311,7 @@ class Invoice(models.Model):
         self.clean()
         super().save(*args, **kwargs)
     
-    @property
-    def late_fee_amount(self):
-        """Calculate the late fee for this invoice if it's overdue."""
-        if self.status != 'OVERDUE' or self.late_fee_percentage <= 0:
-            return Decimal('0.00')
-        return (self.due_balance * self.late_fee_percentage / 100).quantize(Decimal('0.01'))
-    
-    @property
-    def total_with_late_fees(self):
-        """Calculate the total amount including any late fees."""
-        return self.total_amount + self.late_fee_amount
+
     
     @property
     def payment_progress_percentage(self):
@@ -302,14 +325,6 @@ class Invoice(models.Model):
         if self.status == 'OVERDUE' and not self.late_fee_applied and self.late_fee_percentage > 0:
             late_fee = self.late_fee_amount
             if late_fee > 0:
-                InvoiceItem.objects.create(
-                    invoice=self,
-                    product="Late Payment Fee",
-                    description=f"Late payment fee ({self.late_fee_percentage}%) applied on {timezone.now().date()}",
-                    quantity=Decimal('1.00'),
-                    unit_price=late_fee
-                )
-                
                 self.late_fee_applied = True
                 self.save(update_fields=['late_fee_applied'])
                 return True

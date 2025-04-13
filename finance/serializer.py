@@ -211,8 +211,7 @@ class InvoiceSerializer(serializers.ModelSerializer):
     tax_amount = serializers.SerializerMethodField()
     paid_amount = serializers.SerializerMethodField()
     due_balance = serializers.SerializerMethodField()
-    late_fee_amount = serializers.SerializerMethodField()
-    total_with_late_fees = serializers.SerializerMethodField()
+    # late_fee_amount = serializers.SerializerMethodField()
     payment_progress_percentage = serializers.SerializerMethodField()
     
     class Meta:
@@ -222,7 +221,7 @@ class InvoiceSerializer(serializers.ModelSerializer):
             'due_date', 'status', 'tax_rate', 'notes',
             'total_amount', 'tax_amount', 'paid_amount', 'due_balance', 'days_overdue',
             'late_fee_percentage', 'late_fee_applied', 'late_fee_amount',
-            'total_with_late_fees', 'payment_progress_percentage', 'allow_partial_payments',
+            'payment_progress_percentage', 'allow_partial_payments',
             'minimum_payment_amount', 'created_at', 'updated_at', 'items', 'uuid'
         ]
         
@@ -245,11 +244,9 @@ class InvoiceSerializer(serializers.ModelSerializer):
     def get_days_overdue(self, obj):
         return obj.days_overdue
     
-    def get_late_fee_amount(self, obj):
-        return obj.late_fee_amount
+    # def get_late_fee_amount(self, obj):
+    #     return obj.late_fee_amount
     
-    def get_total_with_late_fees(self, obj):
-        return obj.total_with_late_fees
     
     def get_payment_progress_percentage(self, obj):
         return obj.payment_progress_percentage

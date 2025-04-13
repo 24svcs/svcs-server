@@ -31,13 +31,13 @@ def process_overdue_invoices():
     for invoice in pending_overdue_invoices:
         try:
             with transaction.atomic():
-                # Update status to OVERDUE
+                # Let update_status_based_on_payments handle the status update
                 old_status = invoice.status
-                invoice.status = 'OVERDUE'
-                invoice.save(update_fields=['status'])
+                invoice.update_status_based_on_payments()
                 
-                logger.info(f"Changed invoice {invoice.invoice_number} status from {old_status} to OVERDUE")
-                overdue_count += 1
+                if invoice.status == 'OVERDUE' and old_status != 'OVERDUE':
+                    logger.info(f"Changed invoice {invoice.invoice_number} status from {old_status} to OVERDUE")
+                    overdue_count += 1
                 
                 # Apply late fee if configured
                 if invoice.late_fee_percentage > 0 and not invoice.late_fee_applied:
