@@ -95,10 +95,10 @@ class CreatePaymentSerializer(serializers.ModelSerializer):
         ).get()
         
         # Check if invoice can accept payments
-        if invoice.status not in ['SENT', 'OVERDUE', 'PARTIALLY_PAID']:
+        if invoice.status not in ['ISSUED', 'OVERDUE', 'PARTIALLY_PAID']:
             raise serializers.ValidationError({
                 "invoice_id": f"Cannot add payment to invoice in {invoice.status} status. "
-                "Invoice must be SENT, OVERDUE, or PARTIALLY_PAID"
+                "Invoice must be ISSUED, OVERDUE, or PARTIALLY_PAID"
             })
             
         # Check if there are any pending payments for this invoice

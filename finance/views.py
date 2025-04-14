@@ -384,7 +384,7 @@ class PaymentViewSet(
             )
             
         # Only allow cancelling manual payments
-        if payment.payment_method not in ['CASH', 'BANK_TRANSFER']:
+        if payment.payment_method not in ['CASH', 'BANK_TRANSFER', 'WIRE_TRANSFER', 'CHECK']:
             return Response(
                 {"detail": f"Cannot cancel {payment.payment_method} payments. Please use the refund action instead."},
                 status=status.HTTP_400_BAD_REQUEST

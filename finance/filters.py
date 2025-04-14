@@ -26,5 +26,6 @@ class PaymentFilter(FilterSet):
         model = Payment
         fields = {
             'status': ['exact'],
+            'payment_method': ['exact'],
             'payment_date': ['gte', 'lte'],
         }

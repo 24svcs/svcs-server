@@ -184,10 +184,8 @@ class Invoice(models.Model):
         # Calculate base total with tax
         base_total = (items_total + (items_total * self.tax_rate / 100)).quantize(Decimal('0.01'))
         
-        # Add late fee if applicable
-        if self.status == 'OVERDUE' and self.late_fee_applied and self.late_fee_percentage > 0:
-            # Calculate late fee based on the base total minus paid amount
-            unpaid_base = base_total - self.paid_amount
+        # Add late fee if it has been applied
+        if self.late_fee_applied and self.late_fee_amount > 0:
             return base_total + self.late_fee_amount
         
         return base_total
