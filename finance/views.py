@@ -200,7 +200,7 @@ class InvoiceViewSet(
             ).aggregate(
                 total_invoices=Count('id'),
                 draft_invoices=Count('id', filter=Q(status='DRAFT')),
-                pending_invoices=Count('id', filter=Q(status='SENT')),
+                pending_invoices=Count('id', filter=Q(status='ISSUED')),
                 paid_invoices=Count('id', filter=Q(status='PAID')),
                 overdue_invoices=Count('id', filter=Q(status='OVERDUE')),
                 partially_paid=Count('id', filter=Q(status='PARTIALLY_PAID')),
@@ -224,7 +224,7 @@ class InvoiceViewSet(
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        if invoice.status not in ['SENT', 'OVERDUE', 'PARTIALLY_PAID']:
+        if invoice.status not in ['ISSUED', 'OVERDUE', 'PARTIALLY_PAID']:
             return Response(
                 {"detail": f"Cannot send reminder for invoice in {invoice.status} status."},
                 status=status.HTTP_400_BAD_REQUEST
@@ -268,7 +268,7 @@ class InvoiceViewSet(
         try:
             with transaction.atomic():
                 # Update invoice status
-                invoice.status = 'SENT'
+                invoice.status = 'ISSUED'
                 invoice.save()
             
                 serializer = self.get_serializer(invoice)

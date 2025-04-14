@@ -102,7 +102,7 @@ class Invoice(models.Model):
     """
     STATUS_CHOICES = [
         ('DRAFT', 'Draft'),
-        ('SENT', 'Sent'),
+        ('ISSUED', 'Issued'),
         ('PAID', 'Paid'),
         ('OVERDUE', 'Overdue'),
         ('CANCELLED', 'Cancelled'),
@@ -277,7 +277,7 @@ class Invoice(models.Model):
                 self.save(update_fields=['status', 'late_fee_amount', 'late_fee_applied'])
                 return
         else:
-            self.status = 'SENT'
+            self.status = 'ISSUED'
             
         # Only save if status actually changed
         if old_status != self.status:
@@ -366,9 +366,11 @@ class Payment(models.Model):
         ('CASH', 'Cash'),
         ('BANK_TRANSFER', 'Bank Transfer'),
         ('CREDIT_CARD', 'Credit Card'),
+        ('WIRE_TRANSFER', 'Wire Transfer'),
+        ('CHECK', 'Check'),
         ('PAYPAL', 'PayPal'),
-        ('MON_CASH', 'Mon Cash'),
-        ('OTHER', 'Other'),
+        ('MON_CASH', 'MonCash'),
+        
         
     ]
     

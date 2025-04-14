@@ -3,7 +3,7 @@ from rest_framework.response import Response
 
 
 class DefaultPagination(PageNumberPagination):
-    page_size = 10
+    page_size = 50
     
     def get_page_number(self, request, paginator):
         """

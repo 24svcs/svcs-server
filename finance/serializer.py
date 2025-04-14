@@ -47,10 +47,9 @@ class PaymentSerializer(serializers.ModelSerializer):
         model = Payment
         fields = [
             'id', 'invoice_number', 'client_name', 'amount', 'payment_date',
-            'payment_method', 'status', 'transaction_id', 'notes',
-            'created_at', 
+            'payment_method', 'status', 'transaction_id', 'notes', 
         ]
-        read_only_fields = ['created_at', 'status']
+        read_only_fields = ['status']
     
 
 
@@ -76,7 +75,7 @@ class CreatePaymentSerializer(serializers.ModelSerializer):
         return value
     
     def validate_payment_method(self, value):
-        allowed_methods = ['CASH', 'BANK_TRANSFER']
+        allowed_methods = ['CASH', 'BANK_TRANSFER', 'WIRE_TRANSFER', 'CHECK']
         if value not in allowed_methods:
             raise serializers.ValidationError(
                 f"Only manual payment methods ({', '.join(allowed_methods)}) are allowed. "
@@ -243,9 +242,6 @@ class InvoiceSerializer(serializers.ModelSerializer):
     
     def get_days_overdue(self, obj):
         return obj.days_overdue
-    
-    # def get_late_fee_amount(self, obj):
-    #     return obj.late_fee_amount
     
     
     def get_payment_progress_percentage(self, obj):
