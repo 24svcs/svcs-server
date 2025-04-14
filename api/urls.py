@@ -17,7 +17,8 @@ from finance.views import (
     RecurringInvoiceViewSet,
     ClientAddressViewSet,
     StripePaymentViewSet,
-    StripeWebhookView
+    StripeWebhookView,
+    SimpleInvoiceViewSet
 )
 
 from api.views import (
@@ -63,6 +64,9 @@ client_router.register('clients', ClientModelViewset, basename='client')
 invoice_router = routers.NestedDefaultRouter(router, r'organizations', lookup='organization')
 invoice_router.register('invoices', InvoiceViewSet, basename='invoice')
 
+simple_invoice_router = routers.NestedDefaultRouter(router, r'organizations', lookup='organization')
+simple_invoice_router.register('simple-invoices', SimpleInvoiceViewSet, basename='simple-invoice')
+
 payment_router = routers.NestedDefaultRouter(router, r'organizations', lookup='organization')
 payment_router.register('payments', PaymentViewSet, basename='payment')
 
@@ -97,6 +101,7 @@ urlpatterns = [
     path(r'', include(stripe_payment_router.urls)),
     path(r'', include(bulk_items_router.urls)),
     path(r'', include(recurring_invoice_router.urls)),
+    path(r'', include(simple_invoice_router.urls)),
     path(r'', include(client_address_router.urls)),
     path(r'notify-customers/', notify_customers_view, name='notify-customers'),
     path(r'refine-attendance-records/', refine_attendance_records_view, name='refine-attendance-records'),

@@ -37,7 +37,7 @@ from finance.serializers.address_serializers import (
     CreateAddressSerializer,
     UpdateAddressSerializer
 )
-
+from finance.serializers.invoice_serializers import SimpleInvoiceSerializer
 logger = logging.getLogger(__name__)
 
 
@@ -139,6 +139,23 @@ class ClientAddressViewSet(ModelViewSet):
     
     
 # ================================ Invoice Viewset ================================
+
+class SimpleInvoiceViewSet(
+    GenericViewSet,
+    ListModelMixin,
+    RetrieveModelMixin
+):
+    serializer_class = SimpleInvoiceSerializer
+    permission_classes = [IsAuthenticated]
+    pagination_class = DefaultPagination
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter]
+    search_fields = ['invoice_number__istartswith', 'client__name__istartswith']
+    
+    def get_queryset(self):
+        return Invoice.objects.select_related('client').prefetch_related(
+            'items',
+            Prefetch('payments', queryset=Payment.objects.all().select_related('invoice', 'client'))
+        ).exclude(status='DRAFT').filter(organization_id=self.kwargs['organization_pk'])
 
 class InvoiceViewSet(
     GenericViewSet,
