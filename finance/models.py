@@ -42,8 +42,6 @@ class Client(models.Model):
         (BANNED, 'Banned'),
 
     ]
-    
-    
     organization = models.ForeignKey(Organization, models.CASCADE, related_name='clients')
     name = models.CharField(max_length=200)
     email = models.EmailField(null=True, blank=True)
@@ -354,6 +352,9 @@ class InvoiceItem(models.Model):
     def amount(self):
         """Calculate the line item total (quantity * unit_price)."""
         return (self.quantity * self.unit_price).quantize(Decimal('0.01'))
+    
+    
+#=========================================== PAYMENTS ===================================================
 
 class Payment(models.Model):
     """
@@ -368,8 +369,7 @@ class Payment(models.Model):
         ('CHECK', 'Check'),
         ('PAYPAL', 'PayPal'),
         ('MON_CASH', 'MonCash'),
-        
-        
+        ('NAT_CASH', 'NatCash'),
     ]
     
     PAYMENT_STATUS_CHOICES = [
@@ -390,8 +390,8 @@ class Payment(models.Model):
     payment_date = models.DateField()
     payment_method = models.CharField(max_length=20, choices=PAYMENT_METHOD_CHOICES)
     status = models.CharField(max_length=20, choices=PAYMENT_STATUS_CHOICES, default='PENDING')
-    transaction_id = models.CharField(max_length=100, blank=True)
-    notes = models.TextField(blank=True)
+    transaction_id = models.CharField(max_length=100, blank=True, null=True)
+    notes = models.TextField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
@@ -436,7 +436,7 @@ class Payment(models.Model):
                 pass
         
         # Auto-complete non-credit card payments on creation
-        if is_new and self.payment_method in ['CASH', 'BANK_TRANSFER', 'OTHER'] and self.status == 'PENDING':
+        if is_new and self.payment_method in ['CASH', 'BANK_TRANSFER', 'WIRE_TRANSFER', 'CHECK'] and self.status == 'PENDING':
             self.status = 'COMPLETED'
             logger.info(f"Auto-completing {self.payment_method} payment")
         

@@ -340,6 +340,7 @@ class PaymentViewSet(
         context = super().get_serializer_context()
         context['organization_id'] = self.kwargs['organization_pk']
         context['request'] = self.request
+        print('context', context)
         return context
     
     def list(self, request, *args, **kwargs):
@@ -363,8 +364,8 @@ class PaymentViewSet(
     
     def update(self, request, *args, **kwargs):
         """
-        Only allow updating payment method for completed payments.
-        For any other changes, the payment must be cancelled first.
+        Only allow updating payment method and notes for completed payments.
+        For any other changes, the payment must be cancelled.
         """
         payment = self.get_object()
         
@@ -375,20 +376,27 @@ class PaymentViewSet(
                 status=status.HTTP_400_BAD_REQUEST
             )
             
-        # Only allow updating payment method
-        if len(request.data) > 1 or 'payment_method' not in request.data:
+        # Only allow updating payment method and notes
+        if len(request.data) != 2 or 'payment_method' not in request.data or 'notes' not in request.data:
             return Response(
-                {"detail": "Only payment method can be updated for completed payments. For other changes, please cancel the payment first."},
+                {"detail": "Only payment method and notes can be updated for completed payments. For other changes, please cancel the payment."},
                 status=status.HTTP_400_BAD_REQUEST
             )
             
+        # Check if payment method is valid
+        allowed_methods = ['CASH', 'BANK_TRANSFER', 'WIRE_TRANSFER', 'CHECK']
+        if payment.payment_method not in allowed_methods:
+            return Response(
+                {"detail": f"Cannot update {payment.payment_method} payments. Please use the refund action instead."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
         return super().update(request, *args, **kwargs)
     
     @action(detail=True, methods=['post'])
     def cancel(self, request, organization_pk=None, pk=None):
         """
         Cancel a payment and delete it, reverting the invoice to its previous state.
-        Only manual payments (CASH, BANK_TRANSFER) can be cancelled.
+        Only manual payments (CASH, BANK_TRANSFER, etc.) can be cancelled.
         Other payment types must be refunded instead.
         """
         payment = self.get_object()
@@ -401,7 +409,8 @@ class PaymentViewSet(
             )
             
         # Only allow cancelling manual payments
-        if payment.payment_method not in ['CASH', 'BANK_TRANSFER', 'WIRE_TRANSFER', 'CHECK']:
+        allowed_methods = ['CASH', 'BANK_TRANSFER', 'WIRE_TRANSFER', 'CHECK']
+        if payment.payment_method not in allowed_methods:
             return Response(
                 {"detail": f"Cannot cancel {payment.payment_method} payments. Please use the refund action instead."},
                 status=status.HTTP_400_BAD_REQUEST
@@ -442,11 +451,11 @@ class PaymentViewSet(
                 status=status.HTTP_400_BAD_REQUEST
             )
             
-        # For credit card payments, require additional authorization
-        if payment.payment_method == 'CREDIT_CARD' and not request.user.has_perm('finance.refund_credit_card_payment'):
+        allowed_methods = ['CASH', 'BANK_TRANSFER', 'WIRE_TRANSFER', 'CHECK']
+        if payment.payment_method not in allowed_methods:
             return Response(
-                {"detail": "You don't have permission to refund credit card payments. Please contact an administrator."},
-                status=status.HTTP_403_FORBIDDEN
+                {"detail": f"Cannot refund {payment.payment_method} payments. Please use the refund action instead."},
+                status=status.HTTP_400_BAD_REQUEST
             )
         
         try:

@@ -39,19 +39,27 @@ class SimpleInvoiceItemSerializer(serializers.ModelSerializer):
 
 # ================================ Payment Serializers ================================
 class PaymentSerializer(serializers.ModelSerializer):
+    invoice_id = serializers.IntegerField()
     invoice_number = serializers.CharField(source='invoice.invoice_number', read_only=True)
     client_name = serializers.CharField(source='client.name', read_only=True)
-
+    payment_date = serializers.DateField(required=False)
     
     class Meta:
         model = Payment
         fields = [
             'id', 'invoice_number', 'client_name', 'amount', 'payment_date',
-            'payment_method', 'status', 'transaction_id', 'notes', 
+            'payment_method', 'status', 'transaction_id', 'notes', 'invoice_id', 
         ]
         read_only_fields = ['status']
     
-
+    def validate_payment_method(self, value):
+        allowed_methods = ['CASH', 'BANK_TRANSFER', 'WIRE_TRANSFER', 'CHECK', 'NAT_CASH']
+        if value not in allowed_methods:
+            raise serializers.ValidationError(
+                f"Only manual payment methods ({', '.join(allowed_methods)}) are allowed. "
+                "Other payment types must be processed through their respective payment gateways."
+            )
+        return value
 
 class CreatePaymentSerializer(serializers.ModelSerializer):
     invoice_id = serializers.IntegerField()
@@ -75,7 +83,7 @@ class CreatePaymentSerializer(serializers.ModelSerializer):
         return value
     
     def validate_payment_method(self, value):
-        allowed_methods = ['CASH', 'BANK_TRANSFER', 'WIRE_TRANSFER', 'CHECK']
+        allowed_methods = ['CASH', 'BANK_TRANSFER', 'WIRE_TRANSFER', 'CHECK', 'NAT_CASH']
         if value not in allowed_methods:
             raise serializers.ValidationError(
                 f"Only manual payment methods ({', '.join(allowed_methods)}) are allowed. "
@@ -94,11 +102,42 @@ class CreatePaymentSerializer(serializers.ModelSerializer):
             Invoice.objects.filter(id=data['invoice_id'])
         ).get()
         
+        # Check if invoice belongs to the same organization
+        organization_id = self.context.get('organization_id')
+        if not organization_id:
+            raise serializers.ValidationError({
+                "organization_id": "Organization ID is required in context"
+            })
+            
+        if str(invoice.organization_id) != str(organization_id):
+            raise serializers.ValidationError({
+                "invoice_id": f"Invoice organization ID ({invoice.organization_id}) does not match request organization ID ({organization_id})"
+            })
+        
         # Check if invoice can accept payments
         if invoice.status not in ['ISSUED', 'OVERDUE', 'PARTIALLY_PAID']:
             raise serializers.ValidationError({
                 "invoice_id": f"Cannot add payment to invoice in {invoice.status} status. "
                 "Invoice must be ISSUED, OVERDUE, or PARTIALLY_PAID"
+            })
+            
+        # Check if payment date is before invoice issue date
+        payment_date = data.get('payment_date', timezone.now().date())
+        if payment_date < invoice.issue_date:
+            raise serializers.ValidationError({
+                "payment_date": f"Payment date cannot be before invoice issue date ({invoice.issue_date})"
+            })
+            
+        # Check if payment date is in the future
+        if payment_date > timezone.now().date():
+            raise serializers.ValidationError({
+                "payment_date": "Payment date cannot be in the future"
+            })
+            
+        # Check if payment amount is too small
+        if data['amount'] < Decimal('0.01'):
+            raise serializers.ValidationError({
+                "amount": "Payment amount must be at least $0.01"
             })
             
         # Check if there are any pending payments for this invoice
@@ -118,7 +157,7 @@ class CreatePaymentSerializer(serializers.ModelSerializer):
             })
         
         # Check for partial payment restrictions
-        if data['amount'] < balance:  # This is a partial payment
+        if data['amount'] < balance:  # This is likely a partial payment
             if not invoice.allow_partial_payments:
                 raise serializers.ValidationError({
                     "amount": f"This invoice does not allow partial payments. Payment amount must be {balance}."
@@ -144,12 +183,12 @@ class CreatePaymentSerializer(serializers.ModelSerializer):
                 "payment_date": "Payment date cannot be in the future."
             })
                   
-        # Check for duplicate payments in the last 24 hours
-        recent_time_24h = timezone.now() - timezone.timedelta(hours=24)
+        # Check for duplicate payments in the last 1 hour
+        recent_time_1h = timezone.now() - timezone.timedelta(hours=1)
         duplicate_payments = Payment.objects.filter(
             invoice_id=data['invoice_id'],
             amount=data['amount'],
-            created_at__gte=recent_time_24h
+            created_at__gte=recent_time_1h
         ).exists()
         
         if duplicate_payments:
@@ -210,7 +249,6 @@ class InvoiceSerializer(serializers.ModelSerializer):
     tax_amount = serializers.SerializerMethodField()
     paid_amount = serializers.SerializerMethodField()
     due_balance = serializers.SerializerMethodField()
-    # late_fee_amount = serializers.SerializerMethodField()
     payment_progress_percentage = serializers.SerializerMethodField()
     
     class Meta:
@@ -516,11 +554,11 @@ class UpdateInvoiceSerializer(serializers.ModelSerializer):
 class UpdatePaymentSerializer(serializers.ModelSerializer):
     class Meta:
         model = Payment
-        fields = ['payment_method']
+        fields = ['payment_method', 'notes']
         read_only_fields = ['amount', 'payment_date', 'notes', 'transaction_id', 'status']
     
     def validate_payment_method(self, value):
-        allowed_methods = ['CASH', 'BANK_TRANSFER']
+        allowed_methods = ['CASH', 'BANK_TRANSFER', 'CHECK', 'WIRE_TRANSFER']
         if value not in allowed_methods:
             raise serializers.ValidationError(
                 f"Only manual payment methods ({', '.join(allowed_methods)}) are allowed. "
@@ -533,12 +571,12 @@ class UpdatePaymentSerializer(serializers.ModelSerializer):
         payment = self.instance
         
         # Define allowed manual payment methods
-        allowed_methods = ['CASH', 'BANK_TRANSFER']
+        allowed_methods = ['CASH', 'BANK_TRANSFER', 'CHECK', 'WIRE_TRANSFER']
         
         # Check if the original payment method is not a manual method
         if payment.payment_method not in allowed_methods:
             raise serializers.ValidationError({
-                "error": "Only payments made with manual payment methods (CASH, BANK_TRANSFER) can be modified. "
+                "error": f"Only payments made with manual payment methods ({', '.join(allowed_methods)}) can be modified. "
                 "Other payment types must be processed through their respective payment gateways."
             })
         
@@ -547,6 +585,7 @@ class UpdatePaymentSerializer(serializers.ModelSerializer):
     def update(self, instance, validated_data):
         with transaction.atomic():
             instance.payment_method = validated_data['payment_method']
+            instance.notes = validated_data.get('notes', instance.notes)
             instance.save()
             
             return instance
