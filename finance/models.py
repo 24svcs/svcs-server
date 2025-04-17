@@ -151,7 +151,6 @@ class Invoice(models.Model):
     )
     allow_partial_payments = models.BooleanField(
         default=False,
-        editable=False,
         help_text="Whether partial payments are allowed"
     )
 

@@ -1,6 +1,8 @@
-from django.db.models import ExpressionWrapper, Sum, F, Value, Q, DecimalField
+from django.db.models import ExpressionWrapper, Sum, F, Value, Q, DecimalField, Subquery, OuterRef
 from django.db.models.functions import Coalesce
 from decimal import Decimal
+
+from finance.models import Payment
 
 
 def annotate_invoice_calculations(queryset):
@@ -20,6 +22,14 @@ def annotate_invoice_calculations(queryset):
         - calculated_balance: Remaining balance (total - payments)
         - pending_payments_sum: Sum of pending payments
     """
+    # Create a subquery for completed payments
+    completed_payments = Payment.objects.filter(
+        invoice=OuterRef('pk'),
+        status='COMPLETED'
+    ).values('invoice').annotate(
+        total=Sum('amount')
+    ).values('total')
+
     return queryset.annotate(
         calculated_total=ExpressionWrapper(
             Coalesce(
@@ -32,11 +42,7 @@ def annotate_invoice_calculations(queryset):
             output_field=DecimalField(max_digits=10, decimal_places=2)
         ),
         completed_payments_sum=Coalesce(
-            Sum(
-                'payments__amount',
-                filter=Q(payments__status='COMPLETED'),
-                output_field=DecimalField(max_digits=10, decimal_places=2)
-            ),
+            Subquery(completed_payments),
             Value(0, output_field=DecimalField(max_digits=10, decimal_places=2))
         ),
         calculated_balance=ExpressionWrapper(

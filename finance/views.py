@@ -165,21 +165,19 @@ class InvoiceViewSet(
     RetrieveModelMixin
 ):
     pagination_class = DefaultPagination
-    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter]
     search_fields = [
         'invoice_number__istartswith',
         'client__name__istartswith',
         'client__phone__exact',
-        'client__company_name__istartswith',
     ]
-    ordering_fields = ['issue_date', 'due_date', 'created_at', 'status']
+
     ordering = ['-created_at']  # Default ordering
     permission_classes = [IsAuthenticated]
     filterset_class = InvoiceFilter
     throttle_classes = [BurstRateThrottle, SustainedRateThrottle]
     
     def get_queryset(self):
-        from django.db.models import Prefetch
         # Use the utility function to annotate invoice calculations
         return annotate_invoice_calculations(
             Invoice.objects.select_related('client').prefetch_related(
@@ -208,22 +206,36 @@ class InvoiceViewSet(
             serializer = self.get_serializer(page, many=True)
             response = self.get_paginated_response(serializer.data)
             
-            # Calculate statistics
-            current_date = timezone.now().date()
-            thirty_days_ago = current_date - timedelta(days=30)
-            
-            stats = Invoice.objects.filter(
-                organization_id=self.kwargs['organization_pk']
-            ).aggregate(
-                total_invoices=Count('id'),
-                draft_invoices=Count('id', filter=Q(status='DRAFT')),
-                pending_invoices=Count('id', filter=Q(status='ISSUED')),
-                paid_invoices=Count('id', filter=Q(status='PAID')),
-                overdue_invoices=Count('id', filter=Q(status='OVERDUE')),
-                partially_paid=Count('id', filter=Q(status='PARTIALLY_PAID')),
-                invoices_created_30d=Count('id', filter=Q(created_at__gte=thirty_days_ago)),
-                total_value=Sum('items__quantity', filter=Q(items__unit_price__gt=0), default=0)
+            # Get base queryset for organization with annotations
+            org_queryset = annotate_invoice_calculations(
+                Invoice.objects.filter(
+                    organization_id=self.kwargs['organization_pk']
+                )
             )
+            
+            # Calculate detailed statistics
+            stats = {
+                # Amount statistics
+                'total_outstanding': org_queryset.filter(
+                    status__in=['ISSUED', 'OVERDUE', 'PARTIALLY_PAID']
+                ).aggregate(
+                    total=models.Sum('calculated_balance', default=0)
+                )['total'],
+                
+                'total_overdue': org_queryset.filter(
+                    status='OVERDUE'
+                ).aggregate(
+                    total=models.Sum('calculated_balance', default=0)
+                )['total'],
+                
+                'total_paid': org_queryset.filter(
+                    status='PAID'
+                ).aggregate(
+                    total=models.Sum('completed_payments_sum', default=0)
+                )['total']
+            }
+            
+
             
             response.data['statistics'] = stats
             return response

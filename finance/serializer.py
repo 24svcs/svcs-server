@@ -503,18 +503,28 @@ class UpdateInvoiceSerializer(serializers.ModelSerializer):
                     })
         
         # Validate partial payment settings
-        allow_partial = data.get('allow_partial_payments', self.instance.allow_partial_payments)
-        minimum_payment = data.get('minimum_payment_amount', self.instance.minimum_payment_amount)
+        allow_partial = data.get('allow_partial_payments')
+        minimum_payment = data.get('minimum_payment_amount')
         
-        if allow_partial and minimum_payment <= 0:
-            raise serializers.ValidationError({
-                "minimum_payment_amount": "Minimum payment amount must be greater than 0 when partial payments are allowed"
-            })
+        # Only validate if either field is being updated
+        if allow_partial is not None or minimum_payment is not None:
+            # Use current values if not being updated
+            if allow_partial is None:
+                allow_partial = self.instance.allow_partial_payments
+            if minimum_payment is None:
+                minimum_payment = self.instance.minimum_payment_amount
             
-        if not allow_partial and minimum_payment > 0:
-            raise serializers.ValidationError({
-                "minimum_payment_amount": "Minimum payment amount should be 0 when partial payments are not allowed"
-            })
+            # If enabling partial payments, ensure minimum payment is set
+            if allow_partial is True and minimum_payment <= 0:
+                raise serializers.ValidationError({
+                    "minimum_payment_amount": "When enabling partial payments, you must set a minimum payment amount greater than 0"
+                })
+            
+            # If disabling partial payments, ensure minimum payment is 0
+            if allow_partial is False and minimum_payment > 0:
+                raise serializers.ValidationError({
+                    "minimum_payment_amount": "When disabling partial payments, minimum payment amount must be set to 0"
+                })
         
         # Validate late fee percentage
         if 'late_fee_percentage' in data:
@@ -529,23 +539,30 @@ class UpdateInvoiceSerializer(serializers.ModelSerializer):
     def update(self, instance, validated_data):
         items_data = validated_data.pop('items', None)
         
+        # Update invoice fields first
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        instance.save()
+        
+        # Then handle items if provided
         if items_data is not None:
             # Delete existing items only if invoice is in DRAFT status
             if instance.status in ['DRAFT']:
                 instance.items.all().delete()
                 # Create new items
                 for item_data in items_data:
-                    InvoiceItem.objects.create(invoice=instance, **item_data)
+                    InvoiceItem.objects.create(
+                        invoice=instance,
+                        product=item_data['product'],
+                        description=item_data.get('description', ''),
+                        quantity=item_data['quantity'],
+                        unit_price=item_data['unit_price']
+                    )
             else:
                 raise serializers.ValidationError({
                     "items": "Cannot modify items for invoices not in DRAFT status"
                 })
         
-        # Update invoice fields
-        for attr, value in validated_data.items():
-            setattr(instance, attr, value)
-        
-        instance.save()
         return instance
         
 
