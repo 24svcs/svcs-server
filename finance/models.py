@@ -46,7 +46,7 @@ class Client(models.Model):
     name = models.CharField(max_length=200)
     email = models.EmailField(null=True, blank=True)
     phone = PhoneNumberField()
-    tax_number = models.CharField(max_length=50, blank=True)
+    tax_number = models.CharField(max_length=50, blank=True, unique=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     status = models.CharField(max_length=20, choices=MEMBER_STATUS_CHOICES, default=ACTIVE)
@@ -280,34 +280,47 @@ class Invoice(models.Model):
             self.save(update_fields=['status'])
     
     def clean(self):
-        """Validate model fields."""
+        """Validate invoice data."""
         super().clean()
         
-        # If allow_partial_payments is True, minimum_payment_amount must be set
-        if self.allow_partial_payments and self.minimum_payment_amount <= 0:
-            raise ValidationError({
-                'minimum_payment_amount': 'Minimum payment amount must be greater than 0 when partial payments are allowed.'
-            })
-            
-        # If minimum_payment_amount is set but allow_partial_payments is False, warn about inconsistency
-        if not self.allow_partial_payments and self.minimum_payment_amount > 0:
-            raise ValidationError({
-                'minimum_payment_amount': 'Minimum payment amount should be 0 when partial payments are not allowed.'
-            })
-            
-        # Ensure due date is after issue date
+        # Validate dates
         if self.due_date and self.issue_date and self.due_date < self.issue_date:
             raise ValidationError({
-                'due_date': 'Due date cannot be before the issue date.'
+                'due_date': 'Due date cannot be before issue date.'
             })
-    
+            
+        # Validate minimum payment amount
+        if self.allow_partial_payments and self.minimum_payment_amount:
+            # Only validate if we have a minimum payment amount
+            if self.minimum_payment_amount < Decimal('0.50'):
+                raise ValidationError({
+                    'minimum_payment_amount': 'Minimum payment amount must be at least $0.50.'
+                })
+                
+        # Validate late fee percentage
+        if self.late_fee_percentage < Decimal('0') or self.late_fee_percentage > Decimal('100'):
+            raise ValidationError({
+                'late_fee_percentage': 'Late fee percentage must be between 0 and 100.'
+            })
+
     def save(self, *args, **kwargs):
-        """Override save to ensure validations are run."""
+        """Override save to ensure validations are run and handle invoice number generation."""
+        if not self.invoice_number:
+            # Generate invoice number if not set
+            prefix = self.organization.invoice_number_prefix if hasattr(self.organization, 'invoice_number_prefix') else 'INV'
+            last_invoice = Invoice.objects.filter(organization=self.organization).order_by('-invoice_number').first()
+            if last_invoice and last_invoice.invoice_number:
+                try:
+                    last_number = int(last_invoice.invoice_number.split('-')[-1])
+                    self.invoice_number = f"{prefix}-{str(last_number + 1).zfill(6)}"
+                except (ValueError, IndexError):
+                    self.invoice_number = f"{prefix}-{str(uuid.uuid4().hex[:6]).upper()}"
+            else:
+                self.invoice_number = f"{prefix}-{100001}"
+                
         self.clean()
         super().save(*args, **kwargs)
-    
 
-    
     @property
     def payment_progress_percentage(self):
         """Calculate the payment progress as a percentage."""
@@ -324,6 +337,14 @@ class Invoice(models.Model):
                 self.save(update_fields=['late_fee_applied'])
                 return True
         return False
+    
+    class Meta:
+        ordering = ['issue_date']
+        indexes = [
+            models.Index(fields=['issue_date']),
+            models.Index(fields=['due_date']),
+            models.Index(fields=['status'])
+        ]
 
 class InvoiceItem(models.Model):
     """

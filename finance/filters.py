@@ -16,7 +16,7 @@ class InvoiceFilter(FilterSet):
         model = Invoice
         fields = {
             'status': ['exact'],
-            'due_date': ['gte', 'lte'],
+            'due_date': ['exact'],
             'issue_date': ['gte', 'lte'],
         }
 

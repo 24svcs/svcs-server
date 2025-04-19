@@ -3,6 +3,14 @@ from finance.models import Client
 from api.libs import validate_phone
 from phonenumber_field.modelfields import PhoneNumberField
 
+
+# <==============================> Simple Client Serializers <==========================================>
+
+class SimpleClientSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Client
+        fields = ['id', 'name', 'email', 'phone', 'status']
+
 class ClientSerializer(serializers.ModelSerializer):
     total_paid = serializers.SerializerMethodField()
     total_outstanding = serializers.SerializerMethodField()
@@ -21,8 +29,11 @@ class ClientSerializer(serializers.ModelSerializer):
     def get_total_outstanding(self, obj):
         return obj.total_outstanding
     
+    
 
-# <================================> Client Serializers <==========================================>
+    
+
+# <==============================> Create Client Serializers <==========================================>
 
 class CreateClientSerializer(serializers.ModelSerializer):
     phone  =  PhoneNumberField(validators=[validate_phone.validate_phone])

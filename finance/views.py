@@ -30,7 +30,7 @@ from rest_framework.views import APIView
 from django.http import HttpResponse
 from rest_framework.permissions import AllowAny
 from django.db.models import F, Prefetch
-from finance.serializers.client_serializers import  Client, ClientSerializer, CreateClientSerializer, UpdateClientSerializer
+from finance.serializers.client_serializers import  Client, ClientSerializer, CreateClientSerializer, UpdateClientSerializer, SimpleClientSerializer
 from finance.serializers.address_serializers import (
     Address,
     AddressSerializer,
@@ -54,7 +54,6 @@ class ClientModelViewset(ModelViewSet):
         return Client.objects.prefetch_related(
             Prefetch('payments', queryset=Payment.objects.select_related('invoice')),
             Prefetch('invoices', queryset=Invoice.objects.prefetch_related('items')),
-            # Prefetch('addresses', queryset=Address.objects.all())
         ).filter(organization_id=self.kwargs['organization_pk'])
     
     serializer_class = ClientSerializer
@@ -81,6 +80,8 @@ class ClientModelViewset(ModelViewSet):
             )
         client.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+    
+
 
     def list(self, request, *args, **kwargs):
         queryset = self.filter_queryset(self.get_queryset())
@@ -111,6 +112,21 @@ class ClientModelViewset(ModelViewSet):
             return response
 
         serializer = self.get_serializer(queryset, many=True)
+        return Response(serializer.data)
+    
+    
+        
+    @action(detail=False, methods=['get'])
+    def simple(self, request, *args, **kwargs):
+        queryset = Client.objects.filter(organization_id=self.kwargs['organization_pk'], status=Client.ACTIVE).only('id', 'name', 'email', 'phone', 'status')
+        page = self.paginate_queryset(queryset)
+        
+        if page is not None:
+            serializer = SimpleClientSerializer(page, many=True)
+            response = self.get_paginated_response(serializer.data)
+            return response
+        
+        serializer = SimpleClientSerializer(queryset, many=True)
         return Response(serializer.data)
     
     
@@ -162,7 +178,8 @@ class InvoiceViewSet(
     CreateModelMixin,
     UpdateModelMixin,
     ListModelMixin,
-    RetrieveModelMixin
+    RetrieveModelMixin,
+    DestroyModelMixin
 ):
     pagination_class = DefaultPagination
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
@@ -274,7 +291,7 @@ class InvoiceViewSet(
             )
     
     @action(detail=True, methods=['post'])
-    def send_to_client(self, request, organization_pk=None, pk=None):
+    def send(self, request, organization_pk=None, pk=None):
         """
         Send the invoice to the client and change its status to PENDING.
         """
@@ -312,6 +329,55 @@ class InvoiceViewSet(
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
             
+            
+            
+    @action(detail=True, methods=['post'])
+    def cancel(self, request, organization_pk=None, pk=None, *args, **kwargs):
+        invoice = self.get_object()
+        if invoice.status != 'ISSUED':
+            return Response(
+                {"detail": "Cannot cancel invoice in non-issued status."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        with transaction.atomic():
+            invoice.status = 'CANCELLED'
+            invoice.save()
+            
+        return Response({
+            "detail": "Invoice has been cancelled.",
+            "invoice": self.get_serializer(invoice).data
+        })
+        
+        
+    @action(detail=True, methods=['post'])
+    def restore(self, request, organization_pk=None, pk=None, *args, **kwargs):
+        invoice = self.get_object()
+        if invoice.status != 'CANCELLED':
+            return Response(
+                {"detail": "Cannot restore invoice in non-cancelled status."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        with transaction.atomic():
+            invoice.status = 'DRAFT'
+            invoice.save()
+            
+        return Response({
+            "detail": "Invoice has been restored.",
+            "invoice": self.get_serializer(invoice).data
+        })
+            
+    def destroy(self, request, *args, **kwargs):
+        invoice = self.get_object()
+        if invoice.status != 'DRAFT':
+            return Response(
+                {"detail": "Cannot delete invoice in non-DRAFT status."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        invoice.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+    
             
             
 # ================================ Payment Viewset ================================

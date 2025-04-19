@@ -259,7 +259,7 @@ class InvoiceSerializer(serializers.ModelSerializer):
             'total_amount', 'tax_amount', 'paid_amount', 'due_balance', 'days_overdue',
             'late_fee_percentage', 'late_fee_applied', 'late_fee_amount',
             'payment_progress_percentage', 'allow_partial_payments',
-            'minimum_payment_amount', 'created_at', 'updated_at', 'items', 'uuid'
+            'minimum_payment_amount', 'items', 'uuid'
         ]
         
         
@@ -416,30 +416,17 @@ class CreateInvoiceSerializer(serializers.ModelSerializer):
             
         return data
     
-    def generate_invoice_number(self):
-        random_suffix = str(uuid.uuid4().hex)[:6].upper()
-        invoice_number = f"INV-{random_suffix}"
-        
-        # Ensure uniqueness
-        while Invoice.objects.filter(invoice_number=invoice_number).exists():
-            random_suffix = str(uuid.uuid4().hex)[:6].upper()
-            invoice_number = f"INV-{random_suffix}"
-        
-        return invoice_number
-    
     @transaction.atomic
     def create(self, validated_data):
         items_data = validated_data.pop('items')
         organization_id = self.context['organization_id']
+        client_id = validated_data.pop('client_id')
         
-        # Generate unique invoice number
-        invoice_number = self.generate_invoice_number()
-        
-        # Create invoice with generated number and organization
+        # Create invoice with organization and client
         invoice = Invoice.objects.create(
-            invoice_number=invoice_number,
             organization_id=organization_id,
-            status='DRAFT',  # Always start as DRAFT
+            client_id=client_id,
+            status='DRAFT',  
             **validated_data
         )
         
