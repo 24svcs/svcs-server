@@ -18,7 +18,8 @@ from finance.views import (
     ClientAddressViewSet,
     StripePaymentViewSet,
     StripeWebhookView,
-    SimpleInvoiceViewSet
+    SimpleInvoiceViewSet,
+    InvoicePreviewViewSet
 )
 
 from api.views import (
@@ -30,9 +31,11 @@ from api.views import (
 
 # Main router for non-nested routes
 router = routers.DefaultRouter()
-router.register('languages', LanguageViewSet, basename='languages')
+router.register(r'languages', LanguageViewSet, basename='languages')
 router.register(r'organizations', OrganizationViewSet, basename='organizations')
-router.register('users', UserViewSet, basename='users')
+router.register(r'users', UserViewSet, basename='users')
+router.register(r'invoices-preview', InvoicePreviewViewSet, basename='invoice-preview')
+
 # Nested routers
 user_invitation_router = routers.NestedDefaultRouter(router, r'users', lookup='user')
 user_invitation_router.register(r'invitations', UserInvitationViewSet, basename='invitation')
@@ -63,6 +66,8 @@ client_router.register('clients', ClientModelViewset, basename='client')
 
 invoice_router = routers.NestedDefaultRouter(router, r'organizations', lookup='organization')
 invoice_router.register('invoices', InvoiceViewSet, basename='invoice')
+
+
 
 simple_invoice_router = routers.NestedDefaultRouter(router, r'organizations', lookup='organization')
 simple_invoice_router.register('simple-invoices', SimpleInvoiceViewSet, basename='simple-invoice')

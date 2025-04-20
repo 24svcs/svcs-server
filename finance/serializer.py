@@ -3,9 +3,10 @@ from decimal import Decimal
 from django.utils import timezone
 from django.db import transaction
 from .models import Client, Invoice, InvoiceItem, Payment, RecurringInvoice, RecurringInvoiceItem
-import uuid
+
 from decimal import DecimalException
 from .utils import annotate_invoice_calculations
+from .serializers.client_serializers import SimpleClientSerializer
 
 
 # ================================ Invoice Item Serializers ================================
@@ -243,19 +244,20 @@ class CreatePaymentSerializer(serializers.ModelSerializer):
 
 class InvoiceSerializer(serializers.ModelSerializer):
     items = SimpleInvoiceItemSerializer(many=True, read_only=True)
-    client = serializers.SerializerMethodField()
+    client = SimpleClientSerializer()
     days_overdue = serializers.SerializerMethodField()
     total_amount = serializers.SerializerMethodField()
     tax_amount = serializers.SerializerMethodField()
     paid_amount = serializers.SerializerMethodField()
     due_balance = serializers.SerializerMethodField()
     payment_progress_percentage = serializers.SerializerMethodField()
+    organization_name = serializers.SerializerMethodField()
     
     class Meta:
         model = Invoice
         fields = [
             'id','client', 'invoice_number', 'issue_date',
-            'due_date', 'status', 'tax_rate', 'notes',
+            'due_date', 'status', 'tax_rate', 'notes', 'organization_name',
             'total_amount', 'tax_amount', 'paid_amount', 'due_balance', 'days_overdue',
             'late_fee_percentage', 'late_fee_applied', 'late_fee_amount',
             'payment_progress_percentage', 'allow_partial_payments',
@@ -263,9 +265,7 @@ class InvoiceSerializer(serializers.ModelSerializer):
         ]
         
         
-    def get_client(self, obj):
-        return obj.client.name
-    
+
     def get_total_amount(self, obj):
         return obj.total_amount
     
@@ -284,6 +284,9 @@ class InvoiceSerializer(serializers.ModelSerializer):
     
     def get_payment_progress_percentage(self, obj):
         return obj.payment_progress_percentage
+    
+    def get_organization_name(self, obj):
+        return obj.organization.name
     
     
 

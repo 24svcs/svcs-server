@@ -153,6 +153,27 @@ class ClientAddressViewSet(ModelViewSet):
     
     
     
+#===================================== Invoice Preview Viewset ===============================
+
+class InvoicePreviewViewSet(
+    GenericViewSet,
+    ListModelMixin,
+    RetrieveModelMixin
+):
+    serializer_class = InvoiceSerializer
+    permission_classes = [IsAuthenticated]
+    pagination_class = DefaultPagination
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter]
+    
+    def get_queryset(self):
+        return Invoice.objects.select_related('client').prefetch_related(
+            'items',
+            Prefetch('payments', queryset=Payment.objects.all().select_related('invoice', 'client'))
+        ).exclude(status='DRAFT')
+        
+
+    
+    
     
 # ================================ Invoice Viewset ================================
 
@@ -378,6 +399,7 @@ class InvoiceViewSet(
         invoice.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
     
+
             
             
 # ================================ Payment Viewset ================================
