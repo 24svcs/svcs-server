@@ -1,4 +1,6 @@
 from django.http import HttpResponse
+
+from core.services.moncash import get_moncash_online_transaction_fee
 from .jobs.tasks import notify_customers
 from .jobs.refine_attendance_record import refine_attendance_records
 from .jobs.generate_attendance_report import generate_attendance_reports
@@ -7,8 +9,37 @@ from django.conf import settings
 import resend
 import os
 import logging
-from django.shortcuts import redirect
-from django_moncash.utils import init_payment
+from core.services.currency import convert_currency
+
+
+def convert_currency_view(request):
+    try:
+        # Get parameters from request
+        amount = float(request.GET.get('amount', 50))
+        from_currency = request.GET.get('from_currency', 'USD')
+        to_currency = request.GET.get('to_currency', 'HTG')
+        
+        # Convert currency
+        result = convert_currency(amount, from_currency, to_currency)
+        fee = get_moncash_online_transaction_fee(result)
+        return JsonResponse({
+            'status': 'success',
+            'amount': amount,
+            'from_currency': from_currency,
+            'to_currency': to_currency,
+            'converted_amount': result,
+            'processing_fee': fee
+        })
+    except ValueError as e:
+        return JsonResponse({
+            'status': 'error',
+            'message': str(e)
+        }, status=400)
+    except Exception as e:
+        return JsonResponse({
+            'status': 'error',
+            'message': f'An unexpected error occurred: {str(e)}'
+        }, status=500)
 
 
 
@@ -121,21 +152,3 @@ def refine_attendance_records_view(request):
 def generate_attendance_reports_view(request):
     generate_attendance_reports.delay()
     return HttpResponse('Attendance reports generated')
-
-def buy(request):
-
-        """ 
-        params:
-
-            request,                  # django views request
-            amount: float,            # amount to pay
-            return_url: str = None,   # custom return_url, default to current view
-            order_id: str = None,     # unique order_id, default uuidV4
-            meta_data: dict = None    # meta_data associated to the request
-        """
-        payment = init_payment(request,50)
-        
-
-        print(payment)
-
-        return redirect(payment['payment_url'])

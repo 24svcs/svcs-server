@@ -46,7 +46,7 @@ class Client(models.Model):
     name = models.CharField(max_length=200)
     email = models.EmailField(null=True, blank=True)
     phone = PhoneNumberField()
-    tax_number = models.CharField(max_length=50, blank=True, unique=True)
+    tax_number = models.CharField(max_length=50, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     status = models.CharField(max_length=20, choices=MEMBER_STATUS_CHOICES, default=ACTIVE)
@@ -88,9 +88,10 @@ class Client(models.Model):
             models.Index(fields=['name']),
             models.Index(fields=['email']),
             models.Index(fields=['phone']),
-            models.Index(fields=['status'])
+            models.Index(fields=['status']),
         ]
         
+   
     
 
 class Invoice(models.Model):

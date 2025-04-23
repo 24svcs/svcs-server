@@ -19,14 +19,17 @@ from finance.views import (
     StripePaymentViewSet,
     StripeWebhookView,
     SimpleInvoiceViewSet,
-    InvoicePreviewViewSet
+    InvoicePreviewViewSet,
+    MoncashInvoicePaymentView,
+    MoncashWebhookView,
+    MoncashReturnView
 )
 
 from api.views import (
     notify_customers_view, 
     refine_attendance_records_view, 
     generate_attendance_reports_view, 
-
+    convert_currency_view,
 )
 
 # Main router for non-nested routes
@@ -35,6 +38,7 @@ router.register(r'languages', LanguageViewSet, basename='languages')
 router.register(r'organizations', OrganizationViewSet, basename='organizations')
 router.register(r'users', UserViewSet, basename='users')
 router.register(r'invoices-preview', InvoicePreviewViewSet, basename='invoice-preview')
+
 
 # Nested routers
 user_invitation_router = routers.NestedDefaultRouter(router, r'users', lookup='user')
@@ -112,4 +116,8 @@ urlpatterns = [
     path(r'refine-attendance-records/', refine_attendance_records_view, name='refine-attendance-records'),
     path(r'generate-attendance-reports/', generate_attendance_reports_view, name='generate-attendance-reports'),
     path(r'stripe-webhook/', StripeWebhookView.as_view(), name='stripe-webhook'),
+    path(r'moncash-invoice-payment/', MoncashInvoicePaymentView.as_view(), name='moncash'),
+    path(r'moncash-return/', MoncashReturnView.as_view(), name='moncash-return'),
+    path(r'moncash-webhook/', MoncashWebhookView.as_view(), name='moncash-webhook'),
+    path(r'convert-currency/', convert_currency_view, name='convert-currency'),
 ]

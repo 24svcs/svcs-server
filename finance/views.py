@@ -1,7 +1,11 @@
+from django.conf import settings
+from django.shortcuts import redirect
 from rest_framework.viewsets import ModelViewSet, GenericViewSet
 from rest_framework.mixins import CreateModelMixin, DestroyModelMixin, UpdateModelMixin, ListModelMixin, RetrieveModelMixin
 import logging
-from decimal import Decimal, DecimalException
+from decimal import Decimal, DecimalException, InvalidOperation
+
+from core.services.currency import convert_currency
 
 
 from .serializer import (
@@ -38,6 +42,7 @@ from finance.serializers.address_serializers import (
     UpdateAddressSerializer
 )
 from finance.serializers.invoice_serializers import SimpleInvoiceSerializer
+from core.services.moncash import MONCASH_MAX_AMOUNT, get_moncash_online_transaction_fee, process_moncash_payment, verify_moncash_payment, consume_moncash_payment
 logger = logging.getLogger(__name__)
 
 
@@ -1183,8 +1188,278 @@ class RecurringInvoiceViewSet(ModelViewSet):
         return invoice
     
    
+class MoncashInvoicePaymentView(APIView):
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [BurstRateThrottle, SustainedRateThrottle]
+    
+    
+    def get(self, request):
+        return Response({"detail": "Method not allowed."}, status=status.HTTP_405_METHOD_NOT_ALLOWED)
+    
+    
+    def post(self, request):
+        """
+        Create a MonCash payment for an invoice.
+        """
+        try:
+            # Find the invoice by its UUID and organization
+            invoice = Invoice.objects.select_related('client').prefetch_related('items').get(
+                uuid=request.data['invoice_uuid']
+            )
+            
+            # Check if invoice is valid
+            if not invoice:
+                return Response(
+                    {"detail": "Invoice not found"},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+            
+            # Check if invoice can accept payments
+            if invoice.status not in ['ISSUED', 'OVERDUE', 'PARTIALLY_PAID']:
+                return Response(
+                    {"detail": f"Cannot create payment for invoice in {invoice.status} status"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Calculate the amount available to pay
+            amount_to_pay = invoice.due_balance
+            
+            # Get requested payment amount from request, default to full available amount
+            requested_amount = request.data.get('amount', amount_to_pay)
+            
+            # Validate payment amount
+            try:
+                requested_amount = Decimal(str(requested_amount))
+                
+                # Check if payment is too small
+                if requested_amount < Decimal('0.50'):
+                    return Response(
+                        {"detail": "Payment amount must be at least $0.50"},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+                
+                # Check if payment exceeds due balance
+                if requested_amount > amount_to_pay:
+                    return Response(
+                        {"detail": f"Payment amount ${requested_amount} exceeds remaining balance ${amount_to_pay}"},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+                
+                # If partial payments are not allowed, ensure full payment
+                if not invoice.allow_partial_payments and requested_amount < amount_to_pay:
+                    return Response(
+                        {"detail": "This invoice requires full payment of ${amount_to_pay}"},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+                
+                # Check minimum payment amount if partial payments are allowed
+                if invoice.allow_partial_payments and invoice.minimum_payment_amount:
+                    if requested_amount < invoice.minimum_payment_amount:
+                        return Response(
+                            {"detail": f"Minimum payment amount for this invoice is ${invoice.minimum_payment_amount}"},
+                            status=status.HTTP_400_BAD_REQUEST
+                        )
+                
+            except (ValueError, TypeError, InvalidOperation):
+                return Response(
+                    {"detail": "Invalid payment amount"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Check for duplicate payments in last 5 minutes
+            recent_time_5m = timezone.now() - timedelta(minutes=5)
+            recent_payments = Payment.objects.filter(
+                invoice_id=invoice.id,
+                created_at__gte=recent_time_5m
+            ).exists()
+            
+            if recent_payments:
+                return Response(
+                    {"detail": "A payment was recorded for this invoice in the last 5 minutes. Please wait before adding another payment."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Generate unique order ID for this payment attempt
+            payment_order_id = str(uuid.uuid4())
+            organization_currency = invoice.organization.preferences.currency
+            
+            # Convert amount to HTG if needed
+            amount_for_moncash = float(requested_amount)
+            if organization_currency != 'HTG':
+                try:
+                    amount_for_moncash = convert_currency(
+                        amount=float(requested_amount),
+                        from_currency=organization_currency,
+                        to_currency='HTG'
+                    )
+                    print(f"Converted {requested_amount} {organization_currency} to {amount_for_moncash} HTG")
+                except Exception as e:
+                    return Response(
+                        {"detail": f"Error converting payment amount to HTG: {str(e)}"},
+                        status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                    )
+            transaction_fee = get_moncash_online_transaction_fee(amount_for_moncash)
+            amount_to_pay = amount_for_moncash + transaction_fee
+            
+            if amount_to_pay > MONCASH_MAX_AMOUNT:
+                return Response(
+                    {"detail": f"Payment amount ({amount_to_pay:.2f} HTG) exceeds MonCash maximum transaction limit of {MONCASH_MAX_AMOUNT:.2f} HTG. Please use a smaller amount or contact support."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            try:
+                payment = process_moncash_payment(
+                    request=request,
+                    amount=amount_for_moncash,
+                    return_url=request.data.get('return_url'),
+                    order_id=payment_order_id,
+                    transaction_fee=transaction_fee,
+                    total_amount=amount_to_pay,
+                    meta_data={
+                        'invoice_id': str(invoice.id),
+                        'invoice_number': invoice.invoice_number,
+                        'organization_id': str(invoice.organization_id),
+                        'invoice_uuid': str(request.data['invoice_uuid']),
+                        'transaction_fee': str(transaction_fee),
+                        'total_amount': str(amount_to_pay)
+                    }
+                )
+                
+                # Validate payment response
+                if not payment:
+                    return Response(
+                        {"detail": "MonCash payment failed: Empty response received"},
+                        status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                    )
+                
+                # Create a pending payment record
+                Payment.objects.create(
+                    invoice=invoice,
+                    client=invoice.client,
+                    organization=invoice.organization,
+                    amount=requested_amount,
+                    payment_method='MON_CASH',
+                    status='PENDING',
+                    transaction_id=payment['transaction_id'] or payment_order_id,
+                    payment_date=timezone.now().date() 
+                )
+                
+                return Response(payment, status=status.HTTP_200_OK)
+            
+            except Exception as e:
+                error_message = str(e)
+                
+                # Handle specific MonCash errors
+                if "NotFoundError" in error_message:
+                    return Response(
+                        {"detail": "MonCash payment failed: The transaction could not be processed. The amount may exceed MonCash limits or there may be a temporary issue with the payment service."},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+                
+                return Response(
+                    {"detail": f"Error processing MonCash payment: {error_message}"},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
+                
+        except Invoice.DoesNotExist:
+            return Response(
+                {"detail": "Invoice not found"},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        except Exception as e:
+            return Response(
+                {"detail": f"An unexpected error occurred: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
+class MoncashReturnView(APIView):
+    permission_classes = [AllowAny]
     
+    def get(self, request, *args, **kwargs):
+        """Handle MonCash payment return."""
+        try:
+            transaction_id = request.GET.get('transactionId')
+            if not transaction_id:
+                return Response({"detail": "No transaction ID provided"}, status=status.HTTP_400_BAD_REQUEST)
+            
+            # Verify the payment
+            verification = verify_moncash_payment(request, transaction_id)
+            if not verification:
+                return Response({"detail": "Payment verification failed"}, status=status.HTTP_400_BAD_REQUEST)
+            
+            # Find the payment record
+            try:
+                payment = Payment.objects.get(transaction_id=transaction_id)
+            except Payment.DoesNotExist:
+                return Response({"detail": "Payment not found"}, status=status.HTTP_404_NOT_FOUND)
+            
+            # Consume the payment to mark it as processed
+            result = consume_moncash_payment(request, transaction_id)
+            if result.get('error') == 'USED':
+                # Payment already consumed, just update our records if needed
+                if payment.status != 'COMPLETED':
+                    with transaction.atomic():
+                        payment.status = 'COMPLETED'
+                        payment.save()
+                        payment.invoice.update_status_based_on_payments()
+            elif result.get('success'):
+                # Payment successfully consumed, update our records
+                with transaction.atomic():
+                    payment.status = 'COMPLETED'
+                    payment.save()
+                    payment.invoice.update_status_based_on_payments()
+            else:
+                return Response({"detail": "Payment consumption failed"}, status=status.HTTP_400_BAD_REQUEST)
+            
+            # Redirect to the frontend success page
+            frontend_url = f"{settings.FRONTEND_URL}/invoice/{payment.invoice.uuid}/payment-success"
+            return redirect(frontend_url)
+            
+        except Exception as e:
+            logger.error(f"Error processing MonCash return: {str(e)}")
+            # Redirect to the frontend error page
+            frontend_url = f"{settings.FRONTEND_URL}/invoice/{payment.invoice.uuid}/payment-error"
+            return redirect(frontend_url)
+
+class MoncashWebhookView(APIView):
+    permission_classes = [AllowAny]  # Webhooks need to be public
     
-    
-    
+    def post(self, request, *args, **kwargs):
+        """Handle MonCash payment webhook notifications."""
+        try:
+            transaction_id = request.data.get('transactionId')
+            if not transaction_id:
+                return Response({"detail": "No transaction ID provided"}, status=status.HTTP_400_BAD_REQUEST)
+            
+            # Verify and consume the payment
+            verification = verify_moncash_payment(request, transaction_id)
+            if not verification:
+                return Response({"detail": "Payment verification failed"}, status=status.HTTP_400_BAD_REQUEST)
+            
+            # Find the payment record
+            try:
+                payment = Payment.objects.get(transaction_id=transaction_id)
+            except Payment.DoesNotExist:
+                return Response({"detail": "Payment not found"}, status=status.HTTP_404_NOT_FOUND)
+            
+            # Consume the payment to mark it as processed
+            result = consume_moncash_payment(request, transaction_id)
+            if not result or not result.get('success'):
+                return Response({"detail": "Payment consumption failed"}, status=status.HTTP_400_BAD_REQUEST)
+            
+            # Update payment status
+            with transaction.atomic():
+                payment.status = 'COMPLETED'
+                payment.save()
+                
+                # Update invoice status
+                payment.invoice.update_status_based_on_payments()
+            
+            return Response({"status": "success"}, status=status.HTTP_200_OK)
+            
+        except Exception as e:
+            logger.error(f"Error processing MonCash webhook: {str(e)}")
+            return Response(
+                {"detail": "Internal server error"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )

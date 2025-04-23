@@ -7,6 +7,14 @@ from django.core.exceptions import ValidationError
 from django.utils.timezone import now, timedelta
 
 
+def validate_image_file(value):
+    if not value.name.endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp')):
+        raise ValidationError("Only image files are allowed.")
+    
+    if value.size > 1024 * 1024 * 2:  # 2MB limit
+        raise ValidationError("Image file size must be less than 2MB.")
+
+
 class OrganizationManager(models.Manager):
     def get_queryset(self):
         return super().get_queryset().filter(is_active=True)
@@ -51,10 +59,9 @@ class Organization(models.Model):
     industry = models.CharField(max_length=255)
     is_active = models.BooleanField(default=True)
     is_verified = models.BooleanField(default=False)
-    logo_url = models.URLField(blank=True, null=True)
+    logo_url = models.ImageField(blank=True, null=True, upload_to='organization_logos', validators=[validate_image_file])
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-
     
     objects = OrganizationManager()
     all_objects = AllOrganizationManager()
@@ -213,12 +220,31 @@ class Preference(models.Model):
         (LIGHT, 'Light'),
         (SYSTEM, 'System')
     ]
+    
+    AMERICAN_DOLLAR = 'USD'
+    EUROPEAN_EURO = 'EUR'
+    BRITISH_POUND = 'GBP'
+    CANADIAN_DOLLAR = 'CAD'
+    HAITIAN_GOURDE = 'HTG'
+    AUSTRALIAN_DOLLAR = 'AUD'
+    DOMINICAN_PESO = 'DOM'
+    
+    CURRENCY_CHOICES = [
+        (AMERICAN_DOLLAR, "American Dollar"),
+        (EUROPEAN_EURO, "Europen Euro"),
+        (BRITISH_POUND, "British Pound"),
+        (CANADIAN_DOLLAR, "Canadian Dollar"),
+        (HAITIAN_GOURDE, "Haitian Gourde"),
+        (AUSTRALIAN_DOLLAR, "Australian Dollar"),
+        (DOMINICAN_PESO, "Dominican Peso"),
+    ]
 
     
     organization = models.OneToOneField(Organization, on_delete=models.CASCADE, related_name='preferences')
     theme  = models.CharField(max_length=6, choices=MODE_CHOICES, default=SYSTEM)
-    language = models.ForeignKey(Language, on_delete=models.PROTECT, default=1)  # Assuming English has ID=1
+    language = models.ForeignKey(Language, on_delete=models.PROTECT, default=1)
     timezone = TimeZoneField(default='UTC')
+    currency = models.CharField(max_length=3, choices=CURRENCY_CHOICES, default=AMERICAN_DOLLAR)
     
     def __str__(self):
         return f"Preferences for {self.organization.name}"

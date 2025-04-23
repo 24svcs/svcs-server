@@ -63,7 +63,6 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 AUTH_USER_MODEL = 'core.User'
 
 
-
 AUTH_PASSWORD_VALIDATORS = [
     {
         'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator',
@@ -123,9 +122,6 @@ CLERK_JWKS_CACHE_KEY = config('CLERK_JWKS_CACHE_KEY')
 SESSION_COOKIE_SECURE = True
 SESSION_COOKIE_HTTPONLY = True
 CSRF_COOKIE_SECURE = True
-
-
-
 CELERY_BROKER_URL = config('CELERY_BROKER_URL')
 CELERY_RESULT_BACKEND = config('CELERY_RESULT_BACKEND')
 
@@ -135,12 +131,12 @@ RESEND_SMTP_PORT = 587
 RESEND_SMTP_USERNAME = 'resend'
 RESEND_SMTP_HOST = 'smtp.resend.com'
 RESEND_API_KEY = config('RESEND_API_KEY')
-
+EXCHANGE_RATE_API_KEY = config('EXCHANGE_RATE_API_KEY')
 
 MONCASH = {
-        'CLIENT_ID':'YOUR_CLIENT_ID',
-        'SECRET_KEY':'YOUR_SECRET_KEY',
-        'ENVIRONMENT':'sandbox or production'
+        'CLIENT_ID': config('MONCASH_CLIENT_ID'),
+        'SECRET_KEY': config('MONCASH_SECRET_KEY'),
+        'ENVIRONMENT': 'sandbox'
     }
 
 CELERY_BEAT_SCHEDULE = {
