@@ -3,8 +3,8 @@ from .models import Organization, Preference, Member
 
 @admin.register(Organization)
 class OrganizationAdmin(admin.ModelAdmin):
-    list_display = ('id', 'name', 'name_space', 'email', 'phone', 'tax_id', 'logo_url')
-    search_fields = ('id', 'name', 'name_space', 'email', 'phone', 'tax_id', 'logo_url')
+    list_display = ('id', 'name', 'name_space', 'email', 'phone', 'tax_id', 'logo', 'currency')
+    search_fields = ('id', 'name', 'name_space', 'email', 'phone', 'tax_id', 'logo', 'currency')
 
 
 @admin.register(Preference)

@@ -5,8 +5,8 @@ from rest_framework.mixins import CreateModelMixin, DestroyModelMixin, UpdateMod
 import logging
 from decimal import Decimal, DecimalException, InvalidOperation
 
+from api.views import send_invite_email
 from core.services.currency import convert_currency
-
 
 from .serializer import (
     Invoice, InvoiceSerializer, CreateInvoiceSerializer, UpdateInvoiceSerializer,
@@ -20,7 +20,6 @@ from api.pagination import DefaultPagination
 from django_filters.rest_framework import DjangoFilterBackend
 from .filters import ClientFilter, InvoiceFilter, PaymentFilter
 from django.db import models, transaction
-from django.db.models import Q, Sum, Count
 from rest_framework.response import Response
 from django.utils import timezone
 from datetime import timedelta
@@ -341,6 +340,7 @@ class InvoiceViewSet(
             with transaction.atomic():
                 # Update invoice status
                 invoice.status = 'ISSUED'
+                send_invite_email(request)
                 invoice.save()
             
                 serializer = self.get_serializer(invoice)
@@ -1281,7 +1281,7 @@ class MoncashInvoicePaymentView(APIView):
             
             # Generate unique order ID for this payment attempt
             payment_order_id = str(uuid.uuid4())
-            organization_currency = invoice.organization.preferences.currency
+            organization_currency = invoice.organization.currency
             
             # Convert amount to HTG if needed
             amount_for_moncash = float(requested_amount)

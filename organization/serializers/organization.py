@@ -11,7 +11,8 @@ from core.models import User, Language
 from api.libs import (
     validate_email, validate_phone, validate_namespace,validate_name, validate_tax, validate_url
 )
-from django.core.cache import cache
+from django.core.cache import cache 
+
 
 
 def validate_organization_user_id(value):
@@ -25,9 +26,8 @@ class SimpleOrganizationSerializer(serializers.ModelSerializer):
     role = serializers.SerializerMethodField()
     class Meta:
         model = Organization
-        fields = ['id', 'name', 'name_space', 'email', 'logo_url', 'role'
+        fields = ['id', 'name', 'name_space', 'email', 'logo', 'role'
     ]
-
 
 
     def get_role(self, obj):
@@ -58,8 +58,8 @@ class OrganizationSerializer(serializers.ModelSerializer):
     class Meta:
         model = Organization
         fields = [
-            'id', 'name', 'name_space', 'email', 'phone', 'tax_id', 'organization_type', 'industry', 'is_verified', 'description', 'logo_url', 'member_count',  'member_limit', 'role',
-            
+            'id', 'name', 'name_space', 'email', 'phone', 'tax_id', 'organization_type', 'industry', 'is_verified', 'description', 'logo', 'member_count',  'member_limit', 'role',
+            'currency'
         ]
     
     
@@ -131,19 +131,20 @@ class CreateOrganizationSerializer(serializers.ModelSerializer):
     name_space = serializers.CharField(validators=[validate_namespace.validate_organization_namespace])
     email = serializers.EmailField(validators=[validate_email.validate_organization_email])
     phone  =  PhoneNumberField(validators=[validate_phone.validate_phone])
+    # logo = serializers.ImageField(validators=[validate_image_file])
     # organization_type = serializers.ChoiceField(choices=Organization.ORGANIZATION_TYPE_CHOICES)
     
     # OrganizationPreferences fields
     theme = serializers.ChoiceField(choices=Preference.MODE_CHOICES, default=Preference.SYSTEM)
     language_id = serializers.IntegerField(write_only=True)
     timezone = serializers.CharField(default='UTC') 
-    
+    currency = serializers.ChoiceField(choices=Organization.CURRENCY_CHOICES, default=Organization.AMERICAN_DOLLAR)
     class Meta:
         model = Organization
         fields = [
-            'id', 'name', 'name_space', 'email', 'phone', 'tax_id', 'description', 'industry', 'logo_url', 
+            'id', 'name', 'name_space', 'email', 'phone', 'tax_id', 'description', 'industry', 'logo', 
             # OrganizationPreferences fields
-            'theme', 'language_id', 'timezone'
+            'theme', 'language_id', 'timezone', 'currency'
         ]
 
     def validate(self, attrs):
@@ -156,16 +157,20 @@ class CreateOrganizationSerializer(serializers.ModelSerializer):
                 "user": _("This user already has an organization. A user can only have one organization.")
             })
         return attrs
-
+    
+    def validate_currency(self, value):
+        if value not in [v[0] for v in Organization.CURRENCY_CHOICES]:
+            raise serializers.ValidationError(_("Invalid currency."))
+        return value
+    
     def validate_tax_id(self, value):
         return validate_tax.validate_tax_id(value)
     
     def validate_user_id(self, value):
         return validate_organization_user_id(value)
     
-    
-    def validate_logo_url(self, value):
-        return validate_url.validate_url(value)
+    # def validate_logo(self, value):
+    #     return validate_url.validate_url(value)
     
     def validate_language_id(self, value):
         """Validate that the language exists."""
@@ -233,7 +238,7 @@ class UpdateOrganizationSerializer(serializers.ModelSerializer):
     phone  =  PhoneNumberField(validators=[validate_phone.validate_phone])
     class Meta:
         model = Organization
-        fields = ['name', 'name_space', 'email', 'phone', 'tax_id', 'logo_url', 'is_active', 'description', 'industry' ]
+        fields = ['name', 'name_space', 'email', 'phone', 'tax_id', 'logo', 'is_active', 'description', 'industry' ]
 
     def validate_name(self, value):
         if not value:

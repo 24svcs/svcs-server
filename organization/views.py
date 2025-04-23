@@ -52,7 +52,7 @@ class OrganizationViewSet(TimezoneMixin, viewsets.ModelViewSet):
                 members__user=user,
                 members__status=Member.ACTIVE,
             ).only(
-                'id', 'name', 'name_space', 'email', 'logo_url'
+                'id', 'name', 'name_space', 'email', 'logo'
             ).distinct()
         else:
             return Organization.objects.prefetch_related(

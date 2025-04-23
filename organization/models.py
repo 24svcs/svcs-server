@@ -38,12 +38,33 @@ class Organization(models.Model):
         (TEAM, 'Team'),
     ]
     
+    
+    AMERICAN_DOLLAR = 'USD'
+    EUROPEAN_EURO = 'EUR'
+    BRITISH_POUND = 'GBP'
+    CANADIAN_DOLLAR = 'CAD'
+    HAITIAN_GOURDE = 'HTG'
+    AUSTRALIAN_DOLLAR = 'AUD'
+    DOMINICAN_PESO = 'DOM'
+    
+    CURRENCY_CHOICES = [
+        (AMERICAN_DOLLAR, "American Dollar"),
+        (EUROPEAN_EURO, "Europen Euro"),
+        (BRITISH_POUND, "British Pound"),
+        (CANADIAN_DOLLAR, "Canadian Dollar"),
+        (HAITIAN_GOURDE, "Haitian Gourde"),
+        (AUSTRALIAN_DOLLAR, "Australian Dollar"),
+        (DOMINICAN_PESO, "Dominican Peso"),
+    ]
+    
      # Member limits by organization type
     MEMBER_LIMITS = {
         SOLO: 1,
         TEAM: 20,
         ENTERPRISE: 50,
     }
+    
+    
 
     
     
@@ -59,7 +80,8 @@ class Organization(models.Model):
     industry = models.CharField(max_length=255)
     is_active = models.BooleanField(default=True)
     is_verified = models.BooleanField(default=False)
-    logo_url = models.ImageField(blank=True, null=True, upload_to='organization_logos', validators=[validate_image_file])
+    logo = models.ImageField(blank=True, null=True, upload_to='organization_logos', validators=[validate_image_file])
+    currency = models.CharField(max_length=3, choices=CURRENCY_CHOICES, default=AMERICAN_DOLLAR)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     
@@ -167,6 +189,8 @@ class Invitation(models.Model):
         (CREATED, 'Created'),
     ]
     
+
+    
     id = models.UUIDField(default=uuid4, primary_key=True, editable=False)
     organization = models.ForeignKey(Organization, on_delete=models.CASCADE, related_name='invitations')
     email = models.EmailField()
@@ -220,31 +244,13 @@ class Preference(models.Model):
         (LIGHT, 'Light'),
         (SYSTEM, 'System')
     ]
-    
-    AMERICAN_DOLLAR = 'USD'
-    EUROPEAN_EURO = 'EUR'
-    BRITISH_POUND = 'GBP'
-    CANADIAN_DOLLAR = 'CAD'
-    HAITIAN_GOURDE = 'HTG'
-    AUSTRALIAN_DOLLAR = 'AUD'
-    DOMINICAN_PESO = 'DOM'
-    
-    CURRENCY_CHOICES = [
-        (AMERICAN_DOLLAR, "American Dollar"),
-        (EUROPEAN_EURO, "Europen Euro"),
-        (BRITISH_POUND, "British Pound"),
-        (CANADIAN_DOLLAR, "Canadian Dollar"),
-        (HAITIAN_GOURDE, "Haitian Gourde"),
-        (AUSTRALIAN_DOLLAR, "Australian Dollar"),
-        (DOMINICAN_PESO, "Dominican Peso"),
-    ]
+
 
     
     organization = models.OneToOneField(Organization, on_delete=models.CASCADE, related_name='preferences')
     theme  = models.CharField(max_length=6, choices=MODE_CHOICES, default=SYSTEM)
     language = models.ForeignKey(Language, on_delete=models.PROTECT, default=1)
     timezone = TimeZoneField(default='UTC')
-    currency = models.CharField(max_length=3, choices=CURRENCY_CHOICES, default=AMERICAN_DOLLAR)
     
     def __str__(self):
         return f"Preferences for {self.organization.name}"
