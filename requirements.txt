@@ -10,7 +10,7 @@ click-didyoumean==0.3.1
 click-plugins==1.1.1
 click-repl==0.3.0
 cryptography==44.0.2
-Django==5.1.7
+Django==5.2
 django-cors-headers==4.7.0
 django-countries==7.6.1
 django-debug-toolbar==5.1.0
@@ -19,6 +19,7 @@ django-guardian==2.4.0
 django-phonenumber-field==8.0.0
 django-templated-mail==1.1.1
 django-timezone-field==7.1
+django_moncash==2.6.0
 djangorestframework==3.15.2
 dnspython==2.7.0
 drf-nested-routers==0.94.1
@@ -30,8 +31,10 @@ humanize==4.12.2
 idna==3.10
 kombu==5.5.1
 Markdown==3.7
+moncash==1.0.3
 packaging==24.2
 phonenumbers==9.0.1
+pillow==11.2.1
 prometheus_client==0.21.1
 prompt_toolkit==3.0.50
 psycopg2-binary==2.9.10
@@ -42,10 +45,12 @@ python-decouple==3.8
 pytz==2025.2
 redis==5.2.1
 requests==2.32.3
+resend==2.7.0
 six==1.17.0
 sqlparse==0.5.3
+stripe==12.0.0
 tornado==6.4.2
-typing_extensions==4.12.2
+typing_extensions==4.13.1
 tzdata==2025.1
 urllib3==2.3.0
 vine==5.1.0
