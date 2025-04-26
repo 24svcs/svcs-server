@@ -2,6 +2,7 @@ from django.urls import path, include
 from rest_framework_nested import routers
 from core.views import LanguageViewSet, UserViewSet, UserInvitationViewSet
 from organization.views import OrganizationViewSet, MemberViewSet, InvitationViewSet
+
 from human_resources.views import (
     DepartmentModelViewset, 
     PositionModelViewset, 
@@ -22,7 +23,8 @@ from finance.views import (
     InvoicePreviewViewSet,
     MoncashInvoicePaymentView,
     MoncashWebhookView,
-    MoncashReturnView
+    MoncashReturnView,
+    ExpenseModelViewset
 )
 
 from api.views import (
@@ -71,6 +73,10 @@ client_router.register('clients', ClientModelViewset, basename='client')
 invoice_router = routers.NestedDefaultRouter(router, r'organizations', lookup='organization')
 invoice_router.register('invoices', InvoiceViewSet, basename='invoice')
 
+expense_router = routers.NestedDefaultRouter(router, r'organizations', lookup='organization')
+expense_router.register('expenses', ExpenseModelViewset, basename='expense')
+
+
 
 
 simple_invoice_router = routers.NestedDefaultRouter(router, r'organizations', lookup='organization')
@@ -112,6 +118,7 @@ urlpatterns = [
     path(r'', include(recurring_invoice_router.urls)),
     path(r'', include(simple_invoice_router.urls)),
     path(r'', include(client_address_router.urls)),
+    path(r'', include(expense_router.urls)),
     path(r'notify-customers/', notify_customers_view, name='notify-customers'),
     path(r'refine-attendance-records/', refine_attendance_records_view, name='refine-attendance-records'),
     path(r'generate-attendance-reports/', generate_attendance_reports_view, name='generate-attendance-reports'),

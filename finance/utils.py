@@ -77,3 +77,33 @@ def calculate_payment_statistics(queryset):
         failed_payments=Sum('amount', filter=Q(status='FAILED'), default=0),
         refunded_payments=Sum('amount', filter=Q(status='REFUNDED'), default=0),
     ) 
+    
+    
+# Example usage
+invoice = {
+    "id": 120,
+    "client": {
+        "id": 246,
+        "name": "La Pause Inn",
+        "email": "lapauseinn@gmail.com",
+        "phone": "+50939309079",
+        "status": "ACTIVE"
+    },
+    "invoice_number": "INV-100001",
+    # ... rest of your invoice data ...
+}
+
+# # Render the email
+# html_content = render_invoice_email(invoice)
+
+# # Send the email
+# from django.core.mail import send_mail
+# from django.utils.html import strip_tags
+
+# send_mail(
+#     subject=f"Invoice {invoice['invoice_number']} from {invoice['organization_name']}",
+#     message=strip_tags(html_content),
+#     from_email=f"invoices@{invoice['organization_name'].lower().replace(' ', '')}.com",
+#     recipient_list=[invoice['client']['email']],
+#     html_message=html_content
+# )

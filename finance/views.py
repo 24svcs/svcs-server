@@ -7,6 +7,8 @@ from decimal import Decimal, DecimalException, InvalidOperation
 
 from api.views import send_invite_email
 from core.services.currency import convert_currency
+from finance.models import Expense
+from finance.serializers.expense_serializers import CreateExpenseSerializer, ExpenseSerializer
 
 from .serializer import (
     Invoice, InvoiceSerializer, CreateInvoiceSerializer, UpdateInvoiceSerializer,
@@ -42,6 +44,9 @@ from finance.serializers.address_serializers import (
 )
 from finance.serializers.invoice_serializers import SimpleInvoiceSerializer
 from core.services.moncash import MONCASH_MAX_AMOUNT, get_moncash_online_transaction_fee, process_moncash_payment, verify_moncash_payment, consume_moncash_payment
+from django.template.loader import render_to_string
+import datetime
+
 logger = logging.getLogger(__name__)
 
 
@@ -49,7 +54,7 @@ class ClientModelViewset(ModelViewSet):
     pagination_class = DefaultPagination
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
     filterset_class = ClientFilter
-    search_fields = ['name__istartswith', 'email__istartswith', 'phone__exact', 'tax_number__exact']
+    search_fields = ['name__istartswith', 'email__istartswith', 'phone__exact']
     ordering_fields = ['name']
 
     permission_classes = [IsAuthenticated]
@@ -95,21 +100,12 @@ class ClientModelViewset(ModelViewSet):
             serializer = self.get_serializer(page, many=True)
             response = self.get_paginated_response(serializer.data)
             
-            current_date = timezone.now()
-            thirty_days_ago = current_date - timedelta(days=30)
-            
             # Calculate statistics
             stats = Client.objects.filter(organization_id=self.kwargs['organization_pk']).aggregate(
                 total_clients=models.Count('id'),
                 active_clients=models.Count('id', filter=models.Q(status=Client.ACTIVE)),
                 inactive_clients=models.Count('id', filter=models.Q(status=Client.INACTIVE)),
                 banned_clients=models.Count('id', filter=models.Q(status=Client.BANNED)),
-                new_clients_30d=models.Count('id', filter=models.Q(created_at__gte=thirty_days_ago)),
-                clients_with_outstanding_balance=models.Count(
-                    'id',
-                    filter=models.Q(invoices__status='UNPAID') | models.Q(invoices__status='OVERDUE'),
-                    distinct=True
-                )
             )
             
             response.data['statistics'] = stats
@@ -173,7 +169,7 @@ class InvoicePreviewViewSet(
         return Invoice.objects.select_related('client').prefetch_related(
             'items',
             Prefetch('payments', queryset=Payment.objects.all().select_related('invoice', 'client'))
-        ).exclude(status='DRAFT')
+        ).exclude(status='DRAFT').exclude(status='CANCELLED')
         
 
     
@@ -196,7 +192,7 @@ class SimpleInvoiceViewSet(
         return Invoice.objects.select_related('client').prefetch_related(
             'items',
             Prefetch('payments', queryset=Payment.objects.all().select_related('invoice', 'client'))
-        ).exclude(status='DRAFT').filter(organization_id=self.kwargs['organization_pk'])
+        ).exclude(status='DRAFT').exclude(status='CANCELLED').filter(organization_id=self.kwargs['organization_pk'])
 
 class InvoiceViewSet(
     GenericViewSet,
@@ -318,7 +314,7 @@ class InvoiceViewSet(
     @action(detail=True, methods=['post'])
     def send(self, request, organization_pk=None, pk=None):
         """
-        Send the invoice to the client and change its status to PENDING.
+        Send the invoice to the client and change its status to ISSUED.
         """
         invoice = self.get_object()
         
@@ -340,13 +336,19 @@ class InvoiceViewSet(
             with transaction.atomic():
                 # Update invoice status
                 invoice.status = 'ISSUED'
-                send_invite_email(request)
+                
+                # Send the email
+                email_result = send_invoice_email(invoice)
+                if not email_result["success"]:
+                    raise Exception(email_result["error"])
+                
                 invoice.save()
             
                 serializer = self.get_serializer(invoice)
                 return Response({
                     "detail": "Invoice has been sent to the client.",
-                    "invoice": serializer.data
+                    "invoice": serializer.data,
+                    "email_id": email_result.get("email_id")
                 })
                 
         except Exception as e:
@@ -1463,3 +1465,136 @@ class MoncashWebhookView(APIView):
                 {"detail": "Internal server error"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
+def render_invoice_email(invoice):
+    """
+    Render the invoice email template with the provided context.
+    
+    Args:
+        invoice: Invoice model instance containing invoice details and items
+    
+    Returns:
+        str: Rendered HTML email content
+    """
+    context = {
+        'invoice_number': invoice.invoice_number,
+        'client_name': invoice.client.name,
+        'status': invoice.status,
+        'pdf_filename': f"Invoice-{invoice.invoice_number}.pdf",
+        'pdf_size': '68 KB',  # You might want to calculate this dynamically
+        'download_url': f"/api/invoices/{invoice.uuid}/download",  # Adjust this based on your URL structure
+        'invoice_date': invoice.issue_date,
+        'due_date': invoice.due_date,
+        'items': [{
+            'description': item.product,
+            'quantity': f"{item.quantity:.1f}",
+            'price': f"{item.unit_price:.2f}",
+            'amount': f"{item.quantity * item.unit_price:.2f}"
+        } for item in invoice.items.all()],
+        'subtotal': f"{invoice.total_amount:.2f}",
+        'tax_rate': invoice.tax_rate,
+        'tax_amount': f"{invoice.tax_amount:.2f}",
+        'total': f"{invoice.total_amount:.2f}",
+        'minimum_payment': f"{invoice.minimum_payment_amount:.2f}",
+        'late_fee_rate': invoice.late_fee_percentage,
+        'notes': invoice.notes if invoice.notes else None,
+        'payment_url': f"/invoice/{invoice.uuid}/pay",  # Adjust this based on your URL structure
+        'support_email': 'support@vilangestore.com',  # You might want to make this configurable
+        'current_year': datetime.datetime.now().year,
+        'company_name': invoice.organization.name,  # Assuming organization has a name field
+        'company_address': '123 Business Street, City, Country'  # You might want to make this configurable
+    }
+    
+    return render_to_string('emails/issued-invoice.html', context)
+
+def send_invoice_email(invoice, recipient_email=None):
+    """
+    Send an invoice email using Resend.
+    
+    Args:
+        invoice: Invoice model instance containing invoice details and items
+        recipient_email: Optional email address. If not provided, uses client's email
+    
+    Returns:
+        dict: Response from the Resend API containing success status and details
+    """
+    from api.views import send_email_with_resend
+    import logging
+    
+    logger = logging.getLogger(__name__)
+    
+    try:
+        # Generate email content
+        html_content = render_invoice_email(invoice)
+        
+        # Use provided recipient email or fall back to client's email
+        to_email = recipient_email or invoice.client.email
+        
+        # Format the organization name for the from_email
+        org_name = invoice.organization.name.replace("'", "")  # Remove any apostrophes
+        from_email = f"{org_name} <onboarding@resend.dev>"
+        
+        # Send email using Resend
+        email_result = send_email_with_resend(
+            to_emails='24svcs@gmail.com',
+            subject=f"Invoice {invoice.invoice_number} from {org_name}",
+            html_content=html_content,
+            from_email=from_email
+        )
+        
+        if not email_result.get("success", False):
+            logger.error(f"Failed to send invoice email: {email_result.get('error')}")
+            return {
+                "success": False,
+                "error": f"Failed to send email: {email_result.get('error')}"
+            }
+        
+        logger.info(f"Successfully sent invoice email to {to_email}")
+        return {
+            "success": True,
+            "message": "Invoice email sent successfully",
+            "email_id": email_result.get("data", {}).get("id", "")
+        }
+        
+    except Exception as e:
+        logger.exception("Error sending invoice email")
+        return {
+            "success": False,
+            "error": f"An unexpected error occurred: {str(e)}"
+        }
+
+# Example usage:
+"""
+# Send to client's email
+result = send_invoice_email(invoice)
+if result["success"]:
+    print(f"Email sent successfully with ID: {result['email_id']}")
+else:
+    print(f"Failed to send email: {result['error']}")
+
+# Send to specific email
+result = send_invoice_email(invoice, "custom@email.com")
+"""
+
+
+
+
+
+
+
+# Expenses Views
+
+
+class ExpenseModelViewset(ModelViewSet):
+    def get_queryset(self):
+        return  Expense.objects.filter(organization_id=self.kwargs['organization_pk'])
+    
+    def get_serializer_class(self):
+        if self.action == 'create':
+            return CreateExpenseSerializer
+        return ExpenseSerializer
+    
+    def get_serializer_context(self):
+        return {
+            'organization_id': self.kwargs['organization_pk']
+        }
