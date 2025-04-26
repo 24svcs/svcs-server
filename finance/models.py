@@ -7,12 +7,14 @@ import uuid
 from phonenumber_field.modelfields import PhoneNumberField
 from django_countries.fields import CountryField
 import logging
-from django.db.models import Sum
+from django.db.models import Sum, F
 from django.core.exceptions import ValidationError
 import calendar
 from datetime import date, timedelta
 from dateutil.relativedelta import relativedelta
 
+
+# <==============================>  Address Model <==========================================>
 class Address(models.Model):
     """
     Address model for storing client location information.
@@ -23,11 +25,13 @@ class Address(models.Model):
     state = models.CharField(max_length=50)
     zip_code = models.CharField(max_length=10) 
     country = CountryField()
-    client = models.ForeignKey('Client', on_delete=models.CASCADE, related_name='addresses')
+    client = models.OneToOneField('Client', on_delete=models.CASCADE, related_name='address')
     
     def __str__(self):
         return f"{self.street}, {self.city}, {self.state} {self.zip_code}"
     
+
+# <==============================>  Client Model <==========================================>
 
 class Client(models.Model):
     """
@@ -58,14 +62,12 @@ class Client(models.Model):
     def __str__(self):
         return self.name
     
-    
     @property
     def total_paid(self):
         """
         Calculate the total amount paid by this client across all invoices.
         Optimized to use prefetched payments if available.
         """
-        # Use prefetched payments if available
         if hasattr(self, '_prefetched_objects_cache') and 'payments' in self._prefetched_objects_cache:
             return sum(payment.amount for payment in self._prefetched_objects_cache['payments'] 
                       if payment.status == 'COMPLETED')
@@ -75,14 +77,16 @@ class Client(models.Model):
     def total_outstanding(self):
         """
         Calculate the total outstanding balance for this client across all invoices.
-        Optimized to use prefetched invoices if available.
+        Optimized to use prefetched invoices with annotated totals.
         """
-        # Use prefetched invoices if available
         if hasattr(self, '_prefetched_objects_cache') and 'invoices' in self._prefetched_objects_cache:
-            total_invoice_amount = sum(invoice.total_amount for invoice in self._prefetched_objects_cache['invoices'])
-        else:
-            total_invoice_amount = sum(invoice.total_amount for invoice in self.invoices.all())
+            total_invoice_amount = sum(invoice.invoice_total for invoice in self._prefetched_objects_cache['invoices'])
+            return total_invoice_amount - self.total_paid
         
+        # Fallback if prefetched data is not available
+        total_invoice_amount = self.invoices.aggregate(
+            total=Sum(F('items__quantity') * F('items__unit_price') * (1 + F('tax_rate') / 100))
+        )['total'] or 0
         return total_invoice_amount - self.total_paid
     
     class Meta:
@@ -96,6 +100,8 @@ class Client(models.Model):
         
    
     
+
+# <==============================>  Invoice Model <==========================================>
 
 class Invoice(models.Model):
     """
@@ -349,7 +355,8 @@ class Invoice(models.Model):
             models.Index(fields=['due_date']),
             models.Index(fields=['status'])
         ]
-
+        
+# <==============================>  Invoice Item Model <==========================================>
 class InvoiceItem(models.Model):
     """
     Line item within an invoice representing a product or service.
@@ -478,6 +485,8 @@ class Payment(models.Model):
         
         
 
+# <==============================>  Recurring Invoice Model <==========================================>
+
 class RecurringInvoice(models.Model):
     """
     Model for recurring invoice templates that automatically generate
@@ -557,7 +566,10 @@ class RecurringInvoice(models.Model):
         return (self.status == 'ACTIVE' and 
                 self.next_generation_date <= today and 
                 (not self.end_date or self.end_date >= today))
+        
+        
 
+# <==============================>  Recurring Invoice Item Model <==========================================>
 class RecurringInvoiceItem(models.Model):
     """
     Template items for recurring invoices.
@@ -588,7 +600,9 @@ class RecurringInvoiceItem(models.Model):
 
 
 
-# Organization Expenses Model
+
+
+# <==============================>  Expense Model <==========================================>
 
 class Expense(models.Model):
     EXPENSE_CATEGORY_CHOICES  = [

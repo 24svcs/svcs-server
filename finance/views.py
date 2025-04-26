@@ -5,7 +5,6 @@ from rest_framework.mixins import CreateModelMixin, DestroyModelMixin, UpdateMod
 import logging
 from decimal import Decimal, DecimalException, InvalidOperation
 
-from api.views import send_invite_email
 from core.services.currency import convert_currency
 from finance.models import Expense
 from finance.serializers.expense_serializers import CreateExpenseSerializer, ExpenseSerializer
@@ -34,7 +33,8 @@ import uuid
 from rest_framework.views import APIView
 from django.http import HttpResponse
 from rest_framework.permissions import AllowAny
-from django.db.models import F, Prefetch
+from django.db.models import F, Prefetch, OuterRef, Subquery, ExpressionWrapper, DecimalField
+from django.db.models.functions import Coalesce
 from finance.serializers.client_serializers import  Client, ClientSerializer, CreateClientSerializer, UpdateClientSerializer, SimpleClientSerializer
 from finance.serializers.address_serializers import (
     Address,
@@ -46,7 +46,7 @@ from finance.serializers.invoice_serializers import SimpleInvoiceSerializer
 from core.services.moncash import MONCASH_MAX_AMOUNT, get_moncash_online_transaction_fee, process_moncash_payment, verify_moncash_payment, consume_moncash_payment
 from django.template.loader import render_to_string
 import datetime
-
+from django.db.models import Sum, F, ExpressionWrapper, DecimalField
 logger = logging.getLogger(__name__)
 
 
@@ -60,12 +60,38 @@ class ClientModelViewset(ModelViewSet):
     permission_classes = [IsAuthenticated]
     
     def get_queryset(self):
+        # First, create a subquery to calculate invoice totals
+      
+        
+        invoice_items_total = InvoiceItem.objects.filter(
+            invoice=OuterRef('pk')
+        ).values('invoice').annotate(
+            items_total=Sum(F('quantity') * F('unit_price'))
+        ).values('items_total')
+
+        invoice_total = ExpressionWrapper(
+            Coalesce(Subquery(invoice_items_total), 0) * (1 + F('tax_rate') / 100),
+            output_field=DecimalField(max_digits=10, decimal_places=2)
+        )
+
         return Client.objects.prefetch_related(
-            Prefetch('payments', queryset=Payment.objects.select_related('invoice')),
-            Prefetch('invoices', queryset=Invoice.objects.prefetch_related('items')),
-        ).filter(organization_id=self.kwargs['organization_pk'])
+            Prefetch(
+                'payments',
+                queryset=Payment.objects.select_related('invoice').only('id', 'amount', 'status', 'invoice_id', 'client_id')
+            ),
+            Prefetch(
+                'invoices',
+                queryset=Invoice.objects.annotate(
+                    invoice_total=invoice_total
+                ).only('id',  'client_id')
+            ),
+            Prefetch(
+                'address',
+                queryset=Address.objects.all()
+            )
+        ).filter(organization_id=self.kwargs['organization_pk'])\
+            .defer('created_at', 'updated_at', 'stripe_customer_id')
     
-    serializer_class = ClientSerializer
     
     def get_serializer_class(self):
         if self.request.method in ['POST']:
