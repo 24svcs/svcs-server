@@ -120,7 +120,7 @@ class Invoice(models.Model):
     uuid = models.UUIDField(default=uuid.uuid4, editable=False, unique=True)
     organization = models.ForeignKey(Organization, models.CASCADE, related_name='invoices')
     client = models.ForeignKey(Client, on_delete=models.PROTECT, related_name='invoices')
-    invoice_number = models.CharField(max_length=50, unique=True)
+    invoice_number = models.CharField(max_length=50)
     issue_date = models.DateField()
     due_date = models.DateField()
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='DRAFT')
@@ -312,7 +312,6 @@ class Invoice(models.Model):
             raise ValidationError({
                 'late_fee_percentage': 'Late fee percentage must be between 0 and 100.'
             })
-
     def save(self, *args, **kwargs):
         """Override save to ensure validations are run and handle invoice number generation."""
         if not self.invoice_number:
@@ -324,9 +323,9 @@ class Invoice(models.Model):
                     last_number = int(last_invoice.invoice_number.split('-')[-1])
                     self.invoice_number = f"{prefix}-{str(last_number + 1).zfill(6)}"
                 except (ValueError, IndexError):
-                    self.invoice_number = f"{prefix}-{str(uuid.uuid4().hex[:6]).upper()}"
+                    self.invoice_number = f"{prefix}-{str(1).zfill(6)}"  # Start with 000001
             else:
-                self.invoice_number = f"{prefix}-{100001}"
+                self.invoice_number = f"{prefix}-{str(1).zfill(6)}"  # Start with 000001
                 
         self.clean()
         super().save(*args, **kwargs)
@@ -606,7 +605,6 @@ class RecurringInvoiceItem(models.Model):
 
 class Expense(models.Model):
     EXPENSE_CATEGORY_CHOICES  = [
-        # Business/Company Expenses
         ('PAYROLL', 'Payroll & Benefits'),
         ('RENT', 'Rent & Utilities'),
         ('OFFICE_SUPPLIES', 'Office Supplies'),
@@ -625,23 +623,6 @@ class Expense(models.Model):
         ('LEGAL', 'Legal & Professional Fees'),
         ('BANK_FEES', 'Bank & Financial Fees'),
         ('RESEARCH', 'Research & Development'),
-        
-        # Personal/Individual Expenses
-        ('HOUSING', 'Housing & Rent'),
-        ('TRANSPORTATION', 'Transportation'),
-        ('FOOD', 'Food & Dining'),
-        ('UTILITIES', 'Personal Utilities'),
-        ('ENTERTAINMENT', 'Entertainment'),
-        ('INSURANCE_PERSONAL', 'Personal Insurance'),
-        ('HEALTHCARE', 'Healthcare & Medical'),
-        ('EDUCATION', 'Education'),
-        ('GIFTS', 'Gifts & Donations'),
-        ('DEBT', 'Debt Payments'),
-        ('PERSONAL', 'Personal Care'),
-        ('INVESTMENTS', 'Investments'),
-        ('CHILDCARE', 'Childcare'),
-        ('PETS', 'Pet Expenses'),
-        ('CLOTHING', 'Clothing'),
         ('OTHER', 'Other Expenses'),
     ]
 
@@ -660,13 +641,6 @@ class Expense(models.Model):
         ('ONE_TIME', 'One Time'),
     ]
 
-    RECURRING_STATUS_CHOICES = [
-        ('ACTIVE', 'Active'),
-        ('CANCELLED', 'Cancelled'),
-        ('PAUSED', 'Paused'),
-        ('ENDED', 'Ended'),  # For subscriptions with end date
-    ]
-
     organization = models.ForeignKey(Organization, models.CASCADE, related_name='expenses')
     name = models.CharField(max_length=255)
     amount = models.DecimalField(max_digits=10, decimal_places=2, validators=[MinValueValidator(Decimal('0.01'))])
@@ -677,17 +651,7 @@ class Expense(models.Model):
     billing_day = models.PositiveIntegerField(
         null=True, blank=True,
         validators=[MinValueValidator(1)],
-        help_text="Day of the period when billing occurs (e.g., day of month for monthly billing)"
-    )
-    recurring_status = models.CharField(
-        max_length=20, 
-        choices=RECURRING_STATUS_CHOICES,
-        null=True, blank=True,
-        help_text="Status of recurring expense subscription"
-    )
-    end_date = models.DateField(
-        null=True, blank=True,
-        help_text="Optional end date for recurring expenses"
+        help_text="Day of the period when billing occurs (e.g., 15 for monthly expenses that bill on the 15th)"
     )
     notes = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -697,7 +661,7 @@ class Expense(models.Model):
         """Validate expense data."""
         super().clean()
         
-        # Validate frequency for recurring expenses
+        # Validate frequency and billing_day for recurring expenses
         if self.expense_type == 'RECURRING':
             if not self.frequency:
                 raise ValidationError({
@@ -707,95 +671,57 @@ class Expense(models.Model):
                 raise ValidationError({
                     'billing_day': 'Billing day is required for recurring expenses.'
                 })
-            if not self.recurring_status:
-                self.recurring_status = 'ACTIVE'  # Default to active for new recurring expenses
-        else:
-            # Clear recurring-specific fields for one-time expenses
-            self.frequency = None
-            self.billing_day = None
-            self.recurring_status = None
-            self.end_date = None
-
-        # Validate billing day based on frequency
-        if self.expense_type == 'RECURRING' and self.frequency and self.billing_day:
+            
+            # Validate billing_day based on frequency
             if self.frequency == 'MONTHLY' and self.billing_day > 31:
                 raise ValidationError({
                     'billing_day': 'Day of month cannot be greater than 31.'
                 })
             elif self.frequency == 'WEEKLY' and self.billing_day > 7:
                 raise ValidationError({
-                    'billing_day': 'Day of week cannot be greater than 7.'
+                    'billing_day': 'Day of week cannot be greater than 7 (1=Monday, 7=Sunday).'
                 })
             elif self.frequency == 'YEARLY' and self.billing_day > 366:
                 raise ValidationError({
                     'billing_day': 'Day of year cannot be greater than 366.'
                 })
+        else:
+            # Clear recurring-specific fields for one-time expenses
+            self.frequency = None
+            self.billing_day = None
 
-        # Validate end_date if provided
-        if self.end_date and self.date and self.end_date < self.date:
-            raise ValidationError({
-                'end_date': 'End date cannot be before start date.'
-            })
-
-        # Auto-update status if end_date is reached
-        if self.end_date and self.end_date < timezone.now().date():
-            self.recurring_status = 'ENDED'
-
-    def get_next_billing_date(self):
-        """
-        Calculate the next billing date based on frequency and billing day.
-        
-        This method handles different frequencies in a realistic way:
-        - Monthly: Bills on specific day of month (e.g., 15th of each month)
-        - Weekly: Bills on specific day of week (1=Monday through 7=Sunday)
-        - Yearly: Bills on specific day of year (1-366)
-        - Quarterly: Bills on specific day within each quarter
-        - Biannual: Bills on specific day within each 6-month period
-        - Daily: Bills every day
-        
-        Returns:
-            date: The next billing date or None if not applicable
-        """
-        if (not self.frequency or 
-            not self.billing_day or 
-            self.expense_type != 'RECURRING' or
-            self.recurring_status != 'ACTIVE'):
+    @property
+    def next_due_date(self):
+        """Calculate the next due date based on frequency and billing day."""
+        if not self.frequency or not self.billing_day or self.expense_type != 'RECURRING':
             return None
-
+            
         today = timezone.now().date()
         
-        # If end_date is set and passed, no more billing
-        if self.end_date and self.end_date < today:
-            return None
-        
         if self.frequency == 'MONTHLY':
-            # Start with this month's billing day
-            next_date = date(today.year, today.month, 
-                           min(self.billing_day, calendar.monthrange(today.year, today.month)[1]))
-            # If that's in the past or today, move to next month
-            if next_date <= today:
-                next_month = today + relativedelta(months=1)
-                next_date = date(next_month.year, next_month.month, 
-                               min(self.billing_day, calendar.monthrange(next_month.year, next_month.month)[1]))
-        
+            # Get next month's billing day
+            next_month = today + relativedelta(months=1)
+            # Handle months with fewer days
+            last_day = calendar.monthrange(next_month.year, next_month.month)[1]
+            billing_day = min(self.billing_day, last_day)
+            return date(next_month.year, next_month.month, billing_day)
+            
         elif self.frequency == 'WEEKLY':
             # Get next occurrence of the day of week (1=Monday through 7=Sunday)
             current_day = today.isoweekday()
             days_ahead = self.billing_day - current_day
             if days_ahead <= 0:  # Target day already happened this week
                 days_ahead += 7
-            next_date = today + timedelta(days=days_ahead)
-        
-        elif self.frequency == 'YEARLY':
-            # Get next occurrence of the day of year
-            current_year = today.year
-            try:
-                next_date = date(current_year, 1, 1) + timedelta(days=self.billing_day - 1)
-                if next_date <= today:
-                    next_date = date(current_year + 1, 1, 1) + timedelta(days=self.billing_day - 1)
-            except ValueError:  # Handle leap year
-                next_date = date(current_year, 12, 31)
-        
+            return today + timedelta(days=days_ahead)
+            
+        elif self.frequency == 'BIWEEKLY':
+            # Similar to weekly but with 2-week intervals
+            current_day = today.isoweekday()
+            days_ahead = self.billing_day - current_day
+            if days_ahead <= 0:
+                days_ahead += 14
+            return today + timedelta(days=days_ahead)
+            
         elif self.frequency == 'QUARTERLY':
             # Get next quarter's billing day
             current_quarter = (today.month - 1) // 3
@@ -804,7 +730,8 @@ class Expense(models.Model):
             if next_date <= today:
                 next_quarter = quarter_start + relativedelta(months=3)
                 next_date = next_quarter + timedelta(days=self.billing_day - 1)
-        
+            return next_date
+            
         elif self.frequency == 'BIANNUAL':
             # Get next semi-annual billing day
             current_half = (today.month - 1) // 6
@@ -813,107 +740,38 @@ class Expense(models.Model):
             if next_date <= today:
                 next_half = half_start + relativedelta(months=6)
                 next_date = next_half + timedelta(days=self.billing_day - 1)
-        
-        elif self.frequency == 'BIWEEKLY':
-            # Similar to weekly but with 2-week intervals
-            current_day = today.isoweekday()
-            days_ahead = self.billing_day - current_day
-            if days_ahead <= 0:
-                days_ahead += 14
-            next_date = today + timedelta(days=days_ahead)
-        
+            return next_date
+            
+        elif self.frequency == 'YEARLY':
+            # Get next year's billing day
+            try:
+                next_date = date(today.year + 1, 1, 1) + timedelta(days=self.billing_day - 1)
+                if next_date <= today:
+                    next_date = date(today.year + 2, 1, 1) + timedelta(days=self.billing_day - 1)
+                return next_date
+            except ValueError:  # Handle leap year
+                return date(today.year + 1, 12, 31)
+                
         elif self.frequency == 'DAILY':
-            next_date = today + timedelta(days=1)
+            return today + timedelta(days=1)
             
-        # If end_date is set, don't return dates beyond it
-        if self.end_date and next_date > self.end_date:
-            return None
-            
-        return next_date
-
-    def should_generate_expense(self):
-        """
-        Check if a new expense instance should be generated based on:
-        - Expense must be recurring and active
-        - Next billing date should be today or in the past
-        - End date (if set) should not be passed
-        """
-        if (self.expense_type != 'RECURRING' or 
-            self.recurring_status != 'ACTIVE'):
-            return False
-            
-        next_billing = self.get_next_billing_date()
-        if not next_billing:
-            return False
-            
-        return next_billing <= timezone.now().date()
-
-    def generate_next_expense(self):
-        """
-        Generate a new one-time expense instance based on this recurring expense.
-        Returns the new expense instance (unsaved) or None if not applicable.
-        """
-        if not self.should_generate_expense():
-            return None
-            
-        next_billing = self.get_next_billing_date()
-        
-        return Expense(
-            organization=self.organization,
-            name=self.name,
-            amount=self.amount,
-            category=self.category,
-            expense_type='ONE_TIME',
-            date=next_billing,
-            notes=f"Auto-generated from recurring expense: {self.name}"
-        )
+        return None
 
     def __str__(self):
         base_str = f"{self.name} - {self.amount} - {self.category}"
         if self.expense_type == 'RECURRING':
-            status_str = f" [{self.recurring_status}]" if self.recurring_status else ""
-            next_date = self.get_next_billing_date()
-            billing_info = f" (Recurring: {self.frequency}, Next billing: {next_date})" if next_date else f" (Recurring: {self.frequency})"
-            return f"{base_str}{billing_info}{status_str} - {self.date}"
+            next_date = self.next_due_date
+            next_date_str = f" (Next due: {next_date})" if next_date else ""
+            return f"{base_str} (Recurring: {self.frequency}, Billing day: {self.billing_day}){next_date_str} - {self.date}"
         return f"{base_str} - {self.date}"
 
     @property
     def is_due_soon(self):
         """Check if the expense is due within the next 7 days."""
-        next_date = self.get_next_billing_date()
-        if not next_date:
+        next_date = self.next_due_date
+        if not next_date or self.expense_type != 'RECURRING':
             return False
         return 0 <= (next_date - timezone.now().date()).days <= 7
-
-    def reactivate_subscription(self):
-        """
-        Safely reactivate a cancelled recurring subscription.
-        Returns True if reactivation was successful, False otherwise.
-        """
-        if self.expense_type != 'RECURRING':
-            raise ValidationError('Can only reactivate recurring expenses.')
-            
-        if self.recurring_status not in ['CANCELLED', 'PAUSED']:
-            raise ValidationError('Can only reactivate cancelled or paused expenses.')
-            
-        # Check if this is the most recent version of this subscription
-        latest_expense = Expense.objects.filter(
-            organization=self.organization,
-            name=self.name,
-            expense_type='RECURRING'
-        ).order_by('-date').first()
-        
-        if latest_expense.id != self.id:
-            raise ValidationError('Can only reactivate the most recent version of a subscription.')
-            
-        # If there's an end_date in the past, clear it since we're reactivating
-        if self.end_date and self.end_date < timezone.now().date():
-            self.end_date = None
-            
-        self.recurring_status = 'ACTIVE'
-        self.save()
-        
-        return True
 
     class Meta:
         ordering = ['-date']
@@ -921,7 +779,6 @@ class Expense(models.Model):
             models.Index(fields=['category']),
             models.Index(fields=['date']),
             models.Index(fields=['expense_type']),
-            models.Index(fields=['recurring_status']),
         ]
     
     

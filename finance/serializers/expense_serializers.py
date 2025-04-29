@@ -9,52 +9,30 @@ class ExpenseSerializer(serializers.ModelSerializer):
     category_display = serializers.CharField(source='get_category_display', read_only=True)
     expense_type_display = serializers.CharField(source='get_expense_type_display', read_only=True)
     frequency_display = serializers.CharField(source='get_frequency_display', read_only=True)
-    recurring_status_display = serializers.CharField(source='get_recurring_status_display', read_only=True)
-    next_billing_date = serializers.DateField(source='get_next_billing_date', read_only=True)
+    next_due_date = serializers.DateField(read_only=True)
     is_due_soon = serializers.BooleanField(read_only=True)
     organization_id = serializers.PrimaryKeyRelatedField(source='organization', read_only=True)
-    can_reactivate = serializers.SerializerMethodField()
 
     class Meta:
         model = Expense
         fields = [
-            'id', 'organization_id', 
+            'id', 'organization_id',
             'category', 'category_display',
             'name', 'amount', 'date',
             'expense_type', 'expense_type_display',
             'frequency', 'frequency_display',
             'billing_day',
-            'recurring_status', 'recurring_status_display',
-            'next_billing_date', 'is_due_soon',
-            'end_date', 'notes', 'can_reactivate'
+            'next_due_date', 'is_due_soon',
+            'notes'
         ]
 
-    def get_can_reactivate(self, obj):
-        """Check if this expense can be reactivated."""
-        if obj.expense_type != 'RECURRING':
-            return False
-            
-        if obj.recurring_status not in ['CANCELLED', 'PAUSED']:
-            return False
-            
-        # Check if this is the most recent version
-        latest_expense = Expense.objects.filter(
-            organization=obj.organization,
-            name=obj.name,
-            expense_type='RECURRING'
-        ).order_by('-date').first()
-        
-        return latest_expense.id == obj.id
-
-
-    
 class CreateExpenseSerializer(serializers.ModelSerializer):
     class Meta:
         model = Expense
         fields = [
             'category', 'name', 'amount', 'date',
             'expense_type', 'frequency', 'billing_day',
-            'recurring_status', 'end_date', 'notes',
+            'notes',
         ]
     
     def validate_amount(self, value):
@@ -81,7 +59,7 @@ class CreateExpenseSerializer(serializers.ModelSerializer):
             if frequency == 'MONTHLY' and value > 31:
                 raise serializers.ValidationError("Day of month cannot be greater than 31.")
             elif frequency == 'WEEKLY' and value > 7:
-                raise serializers.ValidationError("Day of week cannot be greater than 7.")
+                raise serializers.ValidationError("Day of week cannot be greater than 7 (1=Monday, 7=Sunday).")
             elif frequency == 'YEARLY' and value > 366:
                 raise serializers.ValidationError("Day of year cannot be greater than 366.")
 
@@ -92,8 +70,6 @@ class CreateExpenseSerializer(serializers.ModelSerializer):
         expense_type = data.get('expense_type')
         frequency = data.get('frequency')
         billing_day = data.get('billing_day')
-        recurring_status = data.get('recurring_status')
-        end_date = data.get('end_date')
         start_date = data.get('date')
 
         today = timezone.now().date()
@@ -110,8 +86,6 @@ class CreateExpenseSerializer(serializers.ModelSerializer):
             # Clear recurring fields
             data['frequency'] = None
             data['billing_day'] = None
-            data['recurring_status'] = None
-            data['end_date'] = None
 
         # Validate recurring expense requirements
         elif expense_type == 'RECURRING':
@@ -124,10 +98,6 @@ class CreateExpenseSerializer(serializers.ModelSerializer):
                     'billing_day': 'Billing day is required for recurring expenses.'
                 })
             
-            # Set default status for new recurring expenses
-            if not recurring_status:
-                data['recurring_status'] = 'ACTIVE'
-
             # Validate start_date is within the current period based on frequency
             if start_date:
                 period_start = None
@@ -160,12 +130,6 @@ class CreateExpenseSerializer(serializers.ModelSerializer):
                     raise serializers.ValidationError({
                         'date': f'Start date for {frequency.lower()} recurring expense cannot be before {period_start}'
                     })
-
-            # Validate end_date is after start_date
-            if end_date and start_date and end_date <= start_date:
-                raise serializers.ValidationError({
-                    'end_date': 'End date must be after start date.'
-                })
 
         return data
 

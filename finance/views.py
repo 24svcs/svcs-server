@@ -19,7 +19,7 @@ from .serializer import (
 from rest_framework.permissions import IsAuthenticated
 from api.pagination import DefaultPagination
 from django_filters.rest_framework import DjangoFilterBackend
-from .filters import ClientFilter, InvoiceFilter, PaymentFilter
+from .filters import ClientFilter, ExpenseFilter, InvoiceFilter, PaymentFilter
 from django.db import models, transaction
 from rest_framework.response import Response
 from django.utils import timezone
@@ -1610,10 +1610,15 @@ result = send_invoice_email(invoice, "custom@email.com")
 
 # Expenses Views
 
-
 class ExpenseModelViewset(ModelViewSet):
+    pagination_class = DefaultPagination
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter]
+    search_fields = ['name__istartswith', 'category__iexact']
+    filterset_class = ExpenseFilter
+    ordering = ['-date']
+    
     def get_queryset(self):
-        return  Expense.objects.filter(organization_id=self.kwargs['organization_pk'])
+        return Expense.objects.filter(organization_id=self.kwargs['organization_pk'])
     
     def get_serializer_class(self):
         if self.action == 'create':
@@ -1624,3 +1629,43 @@ class ExpenseModelViewset(ModelViewSet):
         return {
             'organization_id': self.kwargs['organization_pk']
         }
+
+    def list(self, request, *args, **kwargs):
+        queryset = self.filter_queryset(self.get_queryset())
+        page = self.paginate_queryset(queryset)
+        
+        if page is not None:
+            serializer = self.get_serializer(page, many=True)
+            response = self.get_paginated_response(serializer.data)
+            
+            # Calculate expense statistics
+            stats = Expense.objects.filter(
+                organization_id=self.kwargs['organization_pk']
+            ).aggregate(
+                total_amount=models.Sum('amount'),
+                recurring_expenses=models.Count('id', filter=models.Q(expense_type='RECURRING')),
+                recurring_amount=models.Sum('amount', filter=models.Q(expense_type='RECURRING')),
+                one_time_expenses=models.Count('id', filter=models.Q(expense_type='ONE_TIME')),
+                one_time_amount=models.Sum('amount', filter=models.Q(expense_type='ONE_TIME')),
+                # Add category-based statistics
+                software_expenses=models.Sum('amount', filter=models.Q(category='SOFTWARE')),
+                rent_expenses=models.Sum('amount', filter=models.Q(category='RENT')),
+                payroll_expenses=models.Sum('amount', filter=models.Q(category='PAYROLL')),
+                marketing_expenses=models.Sum('amount', filter=models.Q(category='MARKETING')),
+                subscriptions_expenses=models.Sum('amount', filter=models.Q(category='SUBSCRIPTIONS'))
+            )
+            
+            # Calculate percentages
+            total_amount = stats['total_amount'] or 0
+            if total_amount > 0:
+                stats['recurring_percentage'] = round((stats['recurring_amount'] or 0) / total_amount * 100, 2)
+                stats['one_time_percentage'] = round((stats['one_time_amount'] or 0) / total_amount * 100, 2)
+            else:
+                stats['recurring_percentage'] = 0
+                stats['one_time_percentage'] = 0
+            
+            response.data['statistics'] = stats
+            return response
+        
+        serializer = self.get_serializer(queryset, many=True)
+        return Response(serializer.data)

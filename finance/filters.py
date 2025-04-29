@@ -1,5 +1,5 @@
 from django_filters.rest_framework import FilterSet
-from .models import Client, Invoice, Payment
+from .models import Client, Expense, Invoice, Payment
 
 
 class ClientFilter(FilterSet):
@@ -28,4 +28,15 @@ class PaymentFilter(FilterSet):
             'status': ['exact'],
             'payment_method': ['exact'],
             'payment_date': ['gte', 'lte'],
+        }
+
+
+class ExpenseFilter(FilterSet):
+    class Meta:
+        model = Expense
+        fields = {
+            'category': ['exact'],
+            'expense_type': ['exact'],
+            'frequency': ['exact'],
+            'date': ['gte', 'lte'],
         }
