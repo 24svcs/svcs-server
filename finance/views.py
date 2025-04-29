@@ -1638,21 +1638,131 @@ class ExpenseModelViewset(ModelViewSet):
             serializer = self.get_serializer(page, many=True)
             response = self.get_paginated_response(serializer.data)
             
-            # Calculate expense statistics
+            # Calculate expense statistics with prepaid amounts
             stats = Expense.objects.filter(
                 organization_id=self.kwargs['organization_pk']
             ).aggregate(
-                total_amount=models.Sum('amount'),
+                # Base amounts
+                total_amount=models.Sum(
+                    models.Case(
+                        models.When(
+                            expense_type='RECURRING',
+                            then=models.F('amount') * models.F('prepaid_periods')
+                        ),
+                        default=models.F('amount'),
+                        output_field=models.DecimalField()
+                    )
+                ),
+                # Recurring expenses
                 recurring_expenses=models.Count('id', filter=models.Q(expense_type='RECURRING')),
-                recurring_amount=models.Sum('amount', filter=models.Q(expense_type='RECURRING')),
+                recurring_amount=models.Sum(
+                    models.Case(
+                        models.When(
+                            expense_type='RECURRING',
+                            then=models.F('amount') * models.F('prepaid_periods')
+                        ),
+                        default=0,
+                        output_field=models.DecimalField()
+                    )
+                ),
+                # One-time expenses
                 one_time_expenses=models.Count('id', filter=models.Q(expense_type='ONE_TIME')),
-                one_time_amount=models.Sum('amount', filter=models.Q(expense_type='ONE_TIME')),
-                # Add category-based statistics
-                software_expenses=models.Sum('amount', filter=models.Q(category='SOFTWARE')),
-                rent_expenses=models.Sum('amount', filter=models.Q(category='RENT')),
-                payroll_expenses=models.Sum('amount', filter=models.Q(category='PAYROLL')),
-                marketing_expenses=models.Sum('amount', filter=models.Q(category='MARKETING')),
-                subscriptions_expenses=models.Sum('amount', filter=models.Q(category='SUBSCRIPTIONS'))
+                one_time_amount=models.Sum(
+                    models.Case(
+                        models.When(
+                            expense_type='ONE_TIME',
+                            then=models.F('amount')
+                        ),
+                        default=0,
+                        output_field=models.DecimalField()
+                    )
+                ),
+                # Category-based statistics with prepaid amounts
+                software_expenses=models.Sum(
+                    models.Case(
+                        models.When(
+                            category='SOFTWARE',
+                            then=models.Case(
+                                models.When(
+                                    expense_type='RECURRING',
+                                    then=models.F('amount') * models.F('prepaid_periods')
+                                ),
+                                default=models.F('amount'),
+                                output_field=models.DecimalField()
+                            )
+                        ),
+                        default=0,
+                        output_field=models.DecimalField()
+                    )
+                ),
+                rent_expenses=models.Sum(
+                    models.Case(
+                        models.When(
+                            category='RENT',
+                            then=models.Case(
+                                models.When(
+                                    expense_type='RECURRING',
+                                    then=models.F('amount') * models.F('prepaid_periods')
+                                ),
+                                default=models.F('amount'),
+                                output_field=models.DecimalField()
+                            )
+                        ),
+                        default=0,
+                        output_field=models.DecimalField()
+                    )
+                ),
+                payroll_expenses=models.Sum(
+                    models.Case(
+                        models.When(
+                            category='PAYROLL',
+                            then=models.Case(
+                                models.When(
+                                    expense_type='RECURRING',
+                                    then=models.F('amount') * models.F('prepaid_periods')
+                                ),
+                                default=models.F('amount'),
+                                output_field=models.DecimalField()
+                            )
+                        ),
+                        default=0,
+                        output_field=models.DecimalField()
+                    )
+                ),
+                marketing_expenses=models.Sum(
+                    models.Case(
+                        models.When(
+                            category='MARKETING',
+                            then=models.Case(
+                                models.When(
+                                    expense_type='RECURRING',
+                                    then=models.F('amount') * models.F('prepaid_periods')
+                                ),
+                                default=models.F('amount'),
+                                output_field=models.DecimalField()
+                            )
+                        ),
+                        default=0,
+                        output_field=models.DecimalField()
+                    )
+                ),
+                subscriptions_expenses=models.Sum(
+                    models.Case(
+                        models.When(
+                            category='SUBSCRIPTIONS',
+                            then=models.Case(
+                                models.When(
+                                    expense_type='RECURRING',
+                                    then=models.F('amount') * models.F('prepaid_periods')
+                                ),
+                                default=models.F('amount'),
+                                output_field=models.DecimalField()
+                            )
+                        ),
+                        default=0,
+                        output_field=models.DecimalField()
+                    )
+                )
             )
             
             # Calculate percentages

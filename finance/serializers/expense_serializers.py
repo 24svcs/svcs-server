@@ -9,19 +9,34 @@ class ExpenseSerializer(serializers.ModelSerializer):
     category_display = serializers.CharField(source='get_category_display', read_only=True)
     expense_type_display = serializers.CharField(source='get_expense_type_display', read_only=True)
     frequency_display = serializers.CharField(source='get_frequency_display', read_only=True)
+    billing_type_display = serializers.CharField(source='get_billing_type_display', read_only=True)
     next_due_date = serializers.DateField(read_only=True)
     is_due_soon = serializers.BooleanField(read_only=True)
     organization_id = serializers.PrimaryKeyRelatedField(source='organization', read_only=True)
+    amount = serializers.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        coerce_to_string=True
+    )
+    total_amount = serializers.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        read_only=True,
+        coerce_to_string=True,
+        help_text="Total amount including prepaid periods"
+    )
 
     class Meta:
         model = Expense
         fields = [
             'id', 'organization_id',
             'category', 'category_display',
-            'name', 'amount', 'date',
+            'name', 'amount', 'total_amount',
+            'date',
             'expense_type', 'expense_type_display',
             'frequency', 'frequency_display',
-            'billing_day',
+            'billing_type', 'billing_type_display',
+            'billing_day', 'prepaid_periods',
             'next_due_date', 'is_due_soon',
             'notes'
         ]
@@ -31,8 +46,8 @@ class CreateExpenseSerializer(serializers.ModelSerializer):
         model = Expense
         fields = [
             'category', 'name', 'amount', 'date',
-            'expense_type', 'frequency', 'billing_day',
-            'notes',
+            'expense_type', 'frequency', 'billing_type',
+            'billing_day', 'prepaid_periods', 'notes',
         ]
     
     def validate_amount(self, value):
@@ -43,15 +58,32 @@ class CreateExpenseSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Amount cannot have more than 2 decimal places.")
         return value
 
+    def validate_prepaid_periods(self, value):
+        """Validate prepaid periods."""
+        expense_type = self.initial_data.get('expense_type')
+        
+        # Only validate prepaid_periods for recurring expenses
+        if expense_type == 'RECURRING':
+            if value < 0:
+                raise serializers.ValidationError("Prepaid periods cannot be negative.")
+            if value > 120:  # Cap at 10 years for monthly expenses
+                raise serializers.ValidationError("Prepaid periods cannot exceed 120 periods.")
+        else:
+            # Clear prepaid_periods for one-time expenses
+            return 0
+            
+        return value
+
     def validate_billing_day(self, value):
-        """Validate billing day based on frequency."""
+        """Validate billing day based on frequency and billing type."""
         expense_type = self.initial_data.get('expense_type')
         frequency = self.initial_data.get('frequency')
+        billing_type = self.initial_data.get('billing_type')
 
-        # Only validate billing_day for recurring expenses
-        if expense_type == 'RECURRING':
+        # Only validate billing_day for recurring expenses with fixed billing
+        if expense_type == 'RECURRING' and billing_type == 'FIXED':
             if value is None:
-                raise serializers.ValidationError("Billing day is required for recurring expenses.")
+                raise serializers.ValidationError("Billing day is required for fixed date billing.")
             
             if not isinstance(value, int):
                 raise serializers.ValidationError("Billing day must be a number.")
@@ -69,7 +101,9 @@ class CreateExpenseSerializer(serializers.ModelSerializer):
         """Cross-field validation."""
         expense_type = data.get('expense_type')
         frequency = data.get('frequency')
+        billing_type = data.get('billing_type')
         billing_day = data.get('billing_day')
+        prepaid_periods = data.get('prepaid_periods', 0)
         start_date = data.get('date')
 
         today = timezone.now().date()
@@ -85,7 +119,9 @@ class CreateExpenseSerializer(serializers.ModelSerializer):
                 })
             # Clear recurring fields
             data['frequency'] = None
+            data['billing_type'] = None
             data['billing_day'] = None
+            data['prepaid_periods'] = 0
 
         # Validate recurring expense requirements
         elif expense_type == 'RECURRING':
@@ -93,10 +129,20 @@ class CreateExpenseSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError({
                     'frequency': 'Frequency is required for recurring expenses.'
                 })
-            if not billing_day:
+            if not billing_type:
                 raise serializers.ValidationError({
-                    'billing_day': 'Billing day is required for recurring expenses.'
+                    'billing_type': 'Billing type is required for recurring expenses.'
                 })
+            
+            # Validate billing_day for fixed billing
+            if billing_type == 'FIXED' and not billing_day:
+                raise serializers.ValidationError({
+                    'billing_day': 'Billing day is required for fixed date billing.'
+                })
+            
+            # Clear billing_day for relative billing
+            if billing_type == 'RELATIVE':
+                data['billing_day'] = None
             
             # Validate start_date is within the current period based on frequency
             if start_date:

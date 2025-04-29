@@ -641,17 +641,37 @@ class Expense(models.Model):
         ('ONE_TIME', 'One Time'),
     ]
 
+    BILLING_TYPE_CHOICES = [
+        ('FIXED', 'Fixed Date'),  # Always bills on specific day (e.g., 15th of month)
+        ('RELATIVE', 'Relative to Start'),  # Bills exactly frequency time from start date
+    ]
+
     organization = models.ForeignKey(Organization, models.CASCADE, related_name='expenses')
     name = models.CharField(max_length=255)
-    amount = models.DecimalField(max_digits=10, decimal_places=2, validators=[MinValueValidator(Decimal('0.01'))])
+    amount = models.DecimalField(
+        max_digits=10, 
+        decimal_places=2, 
+        validators=[MinValueValidator(Decimal('0.01'))],
+        help_text="Amount per period (e.g., monthly amount for monthly expenses)"
+    )
     category = models.CharField(max_length=30, choices=EXPENSE_CATEGORY_CHOICES)
     expense_type = models.CharField(max_length=20, choices=EXPENSE_TYPE_CHOICES, default='ONE_TIME')
     frequency = models.CharField(max_length=20, choices=FREQUENCY_CHOICES, null=True, blank=True)
     date = models.DateField(help_text="Start date for recurring expenses, or expense date for one-time expenses")
+    billing_type = models.CharField(
+        max_length=20, 
+        choices=BILLING_TYPE_CHOICES,
+        null=True, blank=True,
+        help_text="Whether billing is on a fixed date or relative to start date"
+    )
     billing_day = models.PositiveIntegerField(
         null=True, blank=True,
         validators=[MinValueValidator(1)],
         help_text="Day of the period when billing occurs (e.g., 15 for monthly expenses that bill on the 15th)"
+    )
+    prepaid_periods = models.PositiveIntegerField(
+        default=0,
+        help_text="Number of periods that have been prepaid (e.g., 5 for 5 months of prepaid gym membership)"
     )
     notes = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -667,93 +687,176 @@ class Expense(models.Model):
                 raise ValidationError({
                     'frequency': 'Frequency is required for recurring expenses.'
                 })
-            if not self.billing_day:
+            if not self.billing_type:
                 raise ValidationError({
-                    'billing_day': 'Billing day is required for recurring expenses.'
+                    'billing_type': 'Billing type is required for recurring expenses.'
                 })
             
-            # Validate billing_day based on frequency
-            if self.frequency == 'MONTHLY' and self.billing_day > 31:
-                raise ValidationError({
-                    'billing_day': 'Day of month cannot be greater than 31.'
-                })
-            elif self.frequency == 'WEEKLY' and self.billing_day > 7:
-                raise ValidationError({
-                    'billing_day': 'Day of week cannot be greater than 7 (1=Monday, 7=Sunday).'
-                })
-            elif self.frequency == 'YEARLY' and self.billing_day > 366:
-                raise ValidationError({
-                    'billing_day': 'Day of year cannot be greater than 366.'
-                })
+            # Validate billing_day based on frequency and billing_type
+            if self.billing_type == 'FIXED':
+                if not self.billing_day:
+                    raise ValidationError({
+                        'billing_day': 'Billing day is required for fixed date billing.'
+                    })
+                
+                # Validate billing_day based on frequency
+                if self.frequency == 'MONTHLY' and self.billing_day > 31:
+                    raise ValidationError({'billing_day': 'Billing day cannot be greater than 31 for monthly expenses.'})
+                elif self.frequency == 'YEARLY' and self.billing_day > 366:
+                    raise ValidationError({'billing_day': 'Billing day cannot be greater than 366 for yearly expenses.'})
+            else:  # RELATIVE billing
+                # For relative billing, we don't need billing_day
+                self.billing_day = None
         else:
             # Clear recurring-specific fields for one-time expenses
             self.frequency = None
+            self.billing_type = None
             self.billing_day = None
+            self.prepaid_periods = 0
+
+    @property
+    def total_amount(self):
+        """Calculate the total amount including prepaid periods."""
+        if self.expense_type == 'RECURRING' and self.prepaid_periods > 0:
+            return self.amount * self.prepaid_periods
+        return self.amount
+
+    def _calculate_next_due_date(self, base_date):
+        """Helper method to calculate next due date from a given base date."""
+        if self.frequency == 'MONTHLY':
+            return base_date + relativedelta(months=1)
+        elif self.frequency == 'WEEKLY':
+            return base_date + timedelta(days=7)
+        elif self.frequency == 'BIWEEKLY':
+            return base_date + timedelta(days=14)
+        elif self.frequency == 'QUARTERLY':
+            return base_date + relativedelta(months=3)
+        elif self.frequency == 'BIANNUAL':
+            return base_date + relativedelta(months=6)
+        elif self.frequency == 'YEARLY':
+            return base_date + relativedelta(years=1)
+        elif self.frequency == 'DAILY':
+            return base_date + timedelta(days=1)
+        return None
 
     @property
     def next_due_date(self):
-        """Calculate the next due date based on frequency and billing day."""
-        if not self.frequency or not self.billing_day or self.expense_type != 'RECURRING':
+        """Calculate the next due date based on frequency, billing type, and prepaid periods."""
+        if not self.frequency or self.expense_type != 'RECURRING':
             return None
             
         today = timezone.now().date()
         
-        if self.frequency == 'MONTHLY':
-            # Get next month's billing day
-            next_month = today + relativedelta(months=1)
-            # Handle months with fewer days
-            last_day = calendar.monthrange(next_month.year, next_month.month)[1]
-            billing_day = min(self.billing_day, last_day)
-            return date(next_month.year, next_month.month, billing_day)
-            
-        elif self.frequency == 'WEEKLY':
-            # Get next occurrence of the day of week (1=Monday through 7=Sunday)
-            current_day = today.isoweekday()
-            days_ahead = self.billing_day - current_day
-            if days_ahead <= 0:  # Target day already happened this week
-                days_ahead += 7
-            return today + timedelta(days=days_ahead)
-            
-        elif self.frequency == 'BIWEEKLY':
-            # Similar to weekly but with 2-week intervals
-            current_day = today.isoweekday()
-            days_ahead = self.billing_day - current_day
-            if days_ahead <= 0:
-                days_ahead += 14
-            return today + timedelta(days=days_ahead)
-            
-        elif self.frequency == 'QUARTERLY':
-            # Get next quarter's billing day
-            current_quarter = (today.month - 1) // 3
-            quarter_start = date(today.year, current_quarter * 3 + 1, 1)
-            next_date = quarter_start + timedelta(days=self.billing_day - 1)
-            if next_date <= today:
-                next_quarter = quarter_start + relativedelta(months=3)
-                next_date = next_quarter + timedelta(days=self.billing_day - 1)
-            return next_date
-            
-        elif self.frequency == 'BIANNUAL':
-            # Get next semi-annual billing day
-            current_half = (today.month - 1) // 6
-            half_start = date(today.year, current_half * 6 + 1, 1)
-            next_date = half_start + timedelta(days=self.billing_day - 1)
-            if next_date <= today:
-                next_half = half_start + relativedelta(months=6)
-                next_date = next_half + timedelta(days=self.billing_day - 1)
-            return next_date
-            
-        elif self.frequency == 'YEARLY':
-            # Get next year's billing day
-            try:
-                next_date = date(today.year + 1, 1, 1) + timedelta(days=self.billing_day - 1)
-                if next_date <= today:
-                    next_date = date(today.year + 2, 1, 1) + timedelta(days=self.billing_day - 1)
-                return next_date
-            except ValueError:  # Handle leap year
-                return date(today.year + 1, 12, 31)
+        if self.billing_type == 'RELATIVE':
+            # For relative billing, calculate based on start date plus prepaid periods
+            base_date = self.date
+            for _ in range(self.prepaid_periods):
+                next_date = self._calculate_next_due_date(base_date)
+                if next_date:
+                    base_date = next_date
+            return base_date
+        else:  # FIXED billing
+            if self.frequency == 'MONTHLY':
+                # Get next month's billing day
+                next_month = today + relativedelta(months=1)
+                # Handle months with fewer days
+                last_day = calendar.monthrange(next_month.year, next_month.month)[1]
+                billing_day = min(self.billing_day, last_day)
+                base_date = date(next_month.year, next_month.month, billing_day)
                 
-        elif self.frequency == 'DAILY':
-            return today + timedelta(days=1)
+                # Add prepaid periods
+                for _ in range(self.prepaid_periods):
+                    next_date = self._calculate_next_due_date(base_date)
+                    if next_date:
+                        base_date = next_date
+                return base_date
+                
+            elif self.frequency == 'WEEKLY':
+                # Get next occurrence of the day of week (1=Monday through 7=Sunday)
+                current_day = today.isoweekday()
+                days_ahead = self.billing_day - current_day
+                if days_ahead <= 0:  # Target day already happened this week
+                    days_ahead += 7
+                base_date = today + timedelta(days=days_ahead)
+                
+                # Add prepaid periods
+                for _ in range(self.prepaid_periods):
+                    next_date = self._calculate_next_due_date(base_date)
+                    if next_date:
+                        base_date = next_date
+                return base_date
+                
+            elif self.frequency == 'BIWEEKLY':
+                # Similar to weekly but with 2-week intervals
+                current_day = today.isoweekday()
+                days_ahead = self.billing_day - current_day
+                if days_ahead <= 0:
+                    days_ahead += 14
+                base_date = today + timedelta(days=days_ahead)
+                
+                # Add prepaid periods
+                for _ in range(self.prepaid_periods):
+                    next_date = self._calculate_next_due_date(base_date)
+                    if next_date:
+                        base_date = next_date
+                return base_date
+                
+            elif self.frequency == 'QUARTERLY':
+                # Get next quarter's billing day
+                current_quarter = (today.month - 1) // 3
+                quarter_start = date(today.year, current_quarter * 3 + 1, 1)
+                base_date = quarter_start + timedelta(days=self.billing_day - 1)
+                if base_date <= today:
+                    next_quarter = quarter_start + relativedelta(months=3)
+                    base_date = next_quarter + timedelta(days=self.billing_day - 1)
+                
+                # Add prepaid periods
+                for _ in range(self.prepaid_periods):
+                    next_date = self._calculate_next_due_date(base_date)
+                    if next_date:
+                        base_date = next_date
+                return base_date
+                
+            elif self.frequency == 'BIANNUAL':
+                # Get next semi-annual billing day
+                current_half = (today.month - 1) // 6
+                half_start = date(today.year, current_half * 6 + 1, 1)
+                base_date = half_start + timedelta(days=self.billing_day - 1)
+                if base_date <= today:
+                    next_half = half_start + relativedelta(months=6)
+                    base_date = next_half + timedelta(days=self.billing_day - 1)
+                
+                # Add prepaid periods
+                for _ in range(self.prepaid_periods):
+                    next_date = self._calculate_next_due_date(base_date)
+                    if next_date:
+                        base_date = next_date
+                return base_date
+                
+            elif self.frequency == 'YEARLY':
+                # Get next year's billing day
+                try:
+                    base_date = date(today.year + 1, 1, 1) + timedelta(days=self.billing_day - 1)
+                    if base_date <= today:
+                        base_date = date(today.year + 2, 1, 1) + timedelta(days=self.billing_day - 1)
+                    
+                    # Add prepaid periods
+                    for _ in range(self.prepaid_periods):
+                        next_date = self._calculate_next_due_date(base_date)
+                        if next_date:
+                            base_date = next_date
+                    return base_date
+                except ValueError:  # Handle leap year
+                    return date(today.year + 1, 12, 31)
+                    
+            elif self.frequency == 'DAILY':
+                base_date = today + timedelta(days=1)
+                # Add prepaid periods
+                for _ in range(self.prepaid_periods):
+                    next_date = self._calculate_next_due_date(base_date)
+                    if next_date:
+                        base_date = next_date
+                return base_date
             
         return None
 
@@ -762,7 +865,10 @@ class Expense(models.Model):
         if self.expense_type == 'RECURRING':
             next_date = self.next_due_date
             next_date_str = f" (Next due: {next_date})" if next_date else ""
-            return f"{base_str} (Recurring: {self.frequency}, Billing day: {self.billing_day}){next_date_str} - {self.date}"
+            billing_info = f" (Billing: {self.billing_type}, Day: {self.billing_day})" if self.billing_type == 'FIXED' else f" (Billing: {self.billing_type})"
+            prepaid_info = f" (Prepaid: {self.prepaid_periods} periods)" if self.prepaid_periods > 0 else ""
+            total_info = f" (Total: {self.total_amount})" if self.prepaid_periods > 0 else ""
+            return f"{base_str} (Recurring: {self.frequency}){billing_info}{prepaid_info}{total_info}{next_date_str} - {self.date}"
         return f"{base_str} - {self.date}"
 
     @property
@@ -779,6 +885,7 @@ class Expense(models.Model):
             models.Index(fields=['category']),
             models.Index(fields=['date']),
             models.Index(fields=['expense_type']),
+            models.Index(fields=['billing_type']),
         ]
     
     
