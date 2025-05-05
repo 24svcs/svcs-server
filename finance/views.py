@@ -864,7 +864,7 @@ class PublicInvoicePaymentView(APIView):
             invoice = invoice_queryset.get(uuid=invoice_uuid)
             
             # Calculate pending payments manually to ensure accuracy
-            pending_payments = invoice.payments.filter(status='PENDING').aggregate(
+            pending_payments = invoice.payments.filter(status='ISSUED').aggregate(
                 total=models.Sum('amount', default=0)
             )['total']
             
@@ -881,12 +881,12 @@ class PublicInvoicePaymentView(APIView):
                 'status': invoice.status,
                 'due_date': invoice.due_date,
                 'pending_payments': pending_payments,
-                'can_pay': (invoice.status in ['PENDING', 'OVERDUE', 'PARTIALLY_PAID'] 
+                'can_pay': (invoice.status in ['ISSUED', 'OVERDUE', 'PARTIALLY_PAID'] 
                             and available_to_pay > 0),
                 'days_overdue': invoice.days_overdue,
                 'late_fee_percentage': invoice.late_fee_percentage,
                 'late_fee_amount': invoice.late_fee_amount,
-                'total_with_late_fees': invoice.total_with_late_fees,
+                # 'total_with_late_fees': invoice.total_with_late_fees,
                 'allow_partial_payments': invoice.allow_partial_payments,
                 'minimum_payment_amount': invoice.minimum_payment_amount,
                 'payment_progress_percentage': invoice.payment_progress_percentage,
@@ -914,7 +914,7 @@ class PublicInvoicePaymentView(APIView):
             invoice = Invoice.objects.select_related('client', 'organization').get(uuid=invoice_uuid)
             
             # Check if invoice can accept payments
-            if invoice.status not in ['PENDING', 'OVERDUE', 'PARTIALLY_PAID']:
+            if invoice.status not in ['ISSUED', 'OVERDUE', 'PARTIALLY_PAID']:
                 return Response(
                     {"detail": f"Cannot create payment for invoice in {invoice.status} status"},
                     status=status.HTTP_400_BAD_REQUEST
@@ -928,7 +928,7 @@ class PublicInvoicePaymentView(APIView):
                 )
             
             # Check if there are any pending payments for this invoice
-            pending_payments_exist = invoice.payments.filter(status='PENDING').exists()
+            pending_payments_exist = invoice.payments.filter(status='ISSUED').exists()
             if pending_payments_exist:
                 return Response(
                     {"detail": "This invoice already has a pending payment. Please wait for the pending payment to be processed before adding a new payment."},
@@ -1090,7 +1090,7 @@ class BulkInvoiceItemViewSet(GenericViewSet, CreateModelMixin, DestroyModelMixin
                 status=status.HTTP_404_NOT_FOUND
             )
         
-        if invoice.status not in ['DRAFT', 'PENDING']:
+        if invoice.status not in ['DRAFT', 'ISSUED']:
             return Response(
                 {"detail": f"Cannot modify items for invoice in {invoice.status} status"},
                 status=status.HTTP_400_BAD_REQUEST
@@ -1118,7 +1118,7 @@ class RecurringInvoiceViewSet(ModelViewSet):
     search_fields = [
         'title',
         'client__name',
-        'client__company_name',
+        # 'client__company_name',
     ]
     ordering_fields = ['start_date', 'next_generation_date', 'created_at', 'status']
     ordering = ['-created_at']
@@ -1613,7 +1613,7 @@ result = send_invoice_email(invoice, "custom@email.com")
 class ExpenseModelViewset(ModelViewSet):
     pagination_class = DefaultPagination
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
-    search_fields = ['name__istartswith', 'category__iexact']
+    search_fields = ['name__icontains']
     filterset_class = ExpenseFilter
     ordering = ['-date']
     

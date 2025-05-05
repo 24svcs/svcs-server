@@ -50,8 +50,8 @@ class StripeService:
                 }
             }
             
-            if client.company_name:
-                customer_data['description'] = f"Company: {client.company_name}"
+            # if client.company_name:
+            #     customer_data['description'] = f"Company: {client.company_name}"
             
             stripe_customer = stripe.Customer.create(**customer_data)
             

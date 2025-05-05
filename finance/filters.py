@@ -9,8 +9,6 @@ class ClientFilter(FilterSet):
             'status': ['exact'],
         }
         
-
-
 class InvoiceFilter(FilterSet):
     class Meta:
         model = Invoice
