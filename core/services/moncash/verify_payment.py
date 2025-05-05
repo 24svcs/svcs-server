@@ -32,6 +32,7 @@ def verify_payment_by_transaction_id(request, transaction_id):
         payment = gateway.payment.get_by_id(transactionId=transaction_id)
         json_data = {
             "transaction_id": payment['transaction_id'],
+            "reference": payment['reference'],
             "cost": payment['cost'],
             "message": payment['message'],
             "payer": payment['payer'],

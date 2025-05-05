@@ -8,6 +8,7 @@ from core.services.currency import convert_currency
 from core.services.moncash.constant import MONCASH_MAX_AMOUNT
 from core.services.moncash.create_payment_intent import create_payment_intent
 from core.services.moncash.utils import get_moncash_online_transaction_fee
+from core.services.moncash.verify_payment import verify_payment_by_transaction_id
 from finance.models import Expense
 from finance.serializers.expense_serializers import CreateExpenseSerializer, ExpenseSerializer
 
@@ -1369,7 +1370,8 @@ class MoncashInvoicePaymentView(APIView):
                     payment_method='MON_CASH',
                     status='PENDING',
                     transaction_id=payment['transaction_id'] or payment_order_id,
-                    payment_date=timezone.now().date() 
+                    payment_date=timezone.now().date(),
+                    reference=payment_order_id
                 )
                 
                 return Response(payment, status=status.HTTP_200_OK)
@@ -1404,46 +1406,44 @@ class MoncashInvoicePaymentView(APIView):
 class MoncashWebhookView(APIView):
     permission_classes = [AllowAny]
     
-    # def post(self, request, *args, **kwargs):
-    #     print("MoncashWebhookView ---")
-    #     """Handle MonCash payment webhook notifications."""
-    #     try:
-    #         transaction_id =request.GET.get('transactionId')
-    #         if not transaction_id:
-    #             return Response({"detail": "No transaction ID provided"}, status=status.HTTP_400_BAD_REQUEST)
+    def post(self, request, *args, **kwargs):
+        """Handle MonCash payment webhook notifications."""
+        try:
+            transaction_id =request.GET.get('transactionId')
+            if not transaction_id:
+                return Response({"detail": "No transaction ID provided"}, status=status.HTTP_400_BAD_REQUEST)
             
-    #         # Verify and consume the payment
-    #         verification = verify_moncash_payment(request, transaction_id)
-    #         if not verification:
-    #             return Response({"detail": "Payment verification failed"}, status=status.HTTP_400_BAD_REQUEST)
+            # Verify and consume the payment
+            verification = verify_payment_by_transaction_id(request, transaction_id)
+            if not verification:
+                return Response({"detail": "Payment verification failed"}, status=status.HTTP_400_BAD_REQUEST)
             
-    #         # Find the payment record
-    #         try:
-    #             payment = Payment.objects.get(transaction_id=transaction_id)
-    #         except Payment.DoesNotExist:
-    #             return Response({"detail": "Payment not found"}, status=status.HTTP_404_NOT_FOUND)
+            if verification['status'] == 'ERROR':
+                return Response({"detail": verification['message']}, status=status.HTTP_400_BAD_REQUEST)
             
-    #         # Consume the payment to mark it as processed
-    #         result = consume_moncash_payment(request, transaction_id)
-    #         if not result or not result.get('success'):
-    #             return Response({"detail": "Payment consumption failed"}, status=status.HTTP_400_BAD_REQUEST)
+            if verification['status'] == 'NOT_FOUND':
+                return Response({"detail": "Payment not found"}, status=status.HTTP_404_NOT_FOUND)
             
-    #         # Update payment status
-    #         with transaction.atomic():
-    #             payment.status = 'COMPLETED'
-    #             payment.save()
+            if verification['status'] == 'SUCCESS':
+                reference = verification['reference']
+                try:
+                    payment = Payment.objects.get(reference=reference)
+                    with transaction.atomic():
+                        payment.status = 'COMPLETED'
+                        payment.save()
+                        payment.invoice.update_status_based_on_payments()
                 
-    #             # Update invoice status
-    #             payment.invoice.update_status_based_on_payments()
+                    return Response({"status": "success"}, status=status.HTTP_200_OK)
+                except Payment.DoesNotExist:
+                    return Response({"detail": "Payment not found"}, status=status.HTTP_404_NOT_FOUND)
             
-    #         return Response({"status": "success"}, status=status.HTTP_200_OK)
-            
-    #     except Exception as e:
-    #         logger.error(f"Error processing MonCash webhook: {str(e)}")
-    #         return Response(
-    #             {"detail": "Internal server error"},
-    #             status=status.HTTP_500_INTERNAL_SERVER_ERROR
-    #         )
+    
+        except Exception as e:
+            logger.error(f"Error processing MonCash webhook: {str(e)}")
+            return Response(
+                {"detail": "Internal server error"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
 def render_invoice_email(invoice):
     """
