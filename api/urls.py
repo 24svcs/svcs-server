@@ -23,7 +23,6 @@ from finance.views import (
     InvoicePreviewViewSet,
     MoncashInvoicePaymentView,
     MoncashWebhookView,
-    MoncashReturnView,
     ExpenseModelViewset
 )
 
@@ -32,6 +31,7 @@ from api.views import (
     refine_attendance_records_view, 
     generate_attendance_reports_view, 
     convert_currency_view,
+    verify_moncash_payment_view,
 )
 
 # Main router for non-nested routes
@@ -124,7 +124,7 @@ urlpatterns = [
     path(r'generate-attendance-reports/', generate_attendance_reports_view, name='generate-attendance-reports'),
     path(r'stripe-webhook/', StripeWebhookView.as_view(), name='stripe-webhook'),
     path(r'moncash-invoice-payment/', MoncashInvoicePaymentView.as_view(), name='moncash'),
-    path(r'moncash-return/', MoncashReturnView.as_view(), name='moncash-return'),
     path(r'moncash-webhook/', MoncashWebhookView.as_view(), name='moncash-webhook'),
     path(r'convert-currency/', convert_currency_view, name='convert-currency'),
+    path(r'verify-moncash-payment/', verify_moncash_payment_view, name='verify-moncash-payment'),
 ]

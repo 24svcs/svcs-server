@@ -1,6 +1,7 @@
 from django.http import HttpResponse
 
-from core.services.moncash import get_moncash_online_transaction_fee
+from core.services.moncash.utils import get_moncash_online_transaction_fee
+from core.services.moncash.verify_payment import verify_payment_by_reference, verify_payment_by_transaction_id
 from .jobs.tasks import notify_customers
 from .jobs.refine_attendance_record import refine_attendance_records
 from .jobs.generate_attendance_report import generate_attendance_reports
@@ -12,14 +13,23 @@ import logging
 from core.services.currency import convert_currency
 
 
+def verify_moncash_payment_view(request):
+
+    payment = verify_payment_by_transaction_id(request, '2038089381')
+    print(payment)
+    return JsonResponse({
+        'payment': payment
+    })
+
+
+
 def convert_currency_view(request):
+    
     try:
-        # Get parameters from request
         amount = float(request.GET.get('amount', 50))
         from_currency = request.GET.get('from_currency', 'USD')
         to_currency = request.GET.get('to_currency', 'HTG')
         
-        # Convert currency
         result = convert_currency(amount, from_currency, to_currency)
         fee = get_moncash_online_transaction_fee(result)
         return JsonResponse({
