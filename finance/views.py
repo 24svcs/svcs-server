@@ -1408,6 +1408,7 @@ class MoncashWebhookView(APIView):
     
     def post(self, request, *args, **kwargs):
         """Handle MonCash payment webhook notifications."""
+        print("--------------------------- WEBHOOK HAS BEEN CALLED ---------------------------")
         try:
             transaction_id =request.GET.get('transactionId')
             if not transaction_id:

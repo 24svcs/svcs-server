@@ -124,7 +124,7 @@ urlpatterns = [
     path(r'generate-attendance-reports/', generate_attendance_reports_view, name='generate-attendance-reports'),
     path(r'stripe-webhook/', StripeWebhookView.as_view(), name='stripe-webhook'),
     path(r'moncash-invoice-payment/', MoncashInvoicePaymentView.as_view(), name='moncash'),
-    path(r'moncash-webhook/', MoncashWebhookView.as_view(), name='moncash-webhook'),
+    path(r'moncash-webhook-callback/', MoncashWebhookView.as_view(), name='moncash-webhook'),
     path(r'convert-currency/', convert_currency_view, name='convert-currency'),
     path(r'verify-moncash-payment/', verify_moncash_payment_view, name='verify-moncash-payment'),
 ]
