@@ -14,8 +14,11 @@ from core.services.currency import convert_currency
 
 
 def verify_moncash_payment_view(request):
+    transaction_id = request.GET.get('transactionId')
 
-    payment = verify_payment_by_transaction_id(request, '2038089381')
+    payment = verify_payment_by_transaction_id(request, transaction_id)
+    print(transaction_id)
+    
     print(payment)
     return JsonResponse({
         'payment': payment

@@ -1406,7 +1406,7 @@ class MoncashInvoicePaymentView(APIView):
 class MoncashWebhookView(APIView):
     permission_classes = [AllowAny]
     
-    def post(self, request, *args, **kwargs):
+    def get(self, request, *args, **kwargs):
         """Handle MonCash payment webhook notifications."""
         print("--------------------------- WEBHOOK HAS BEEN CALLED ---------------------------")
         try:
@@ -1416,6 +1416,9 @@ class MoncashWebhookView(APIView):
             
             # Verify and consume the payment
             verification = verify_payment_by_transaction_id(request, transaction_id)
+
+            
+            
             if not verification:
                 return Response({"detail": "Payment verification failed"}, status=status.HTTP_400_BAD_REQUEST)
             
@@ -1423,6 +1426,7 @@ class MoncashWebhookView(APIView):
                 return Response({"detail": verification['message']}, status=status.HTTP_400_BAD_REQUEST)
             
             if verification['status'] == 'NOT_FOUND':
+               
                 return Response({"detail": "Payment not found"}, status=status.HTTP_404_NOT_FOUND)
             
             if verification['status'] == 'SUCCESS':
@@ -1430,14 +1434,14 @@ class MoncashWebhookView(APIView):
                 try:
                     payment = Payment.objects.get(reference=reference)
                     with transaction.atomic():
-                        payment.status = 'COMPLETED'
-                        payment.save()
-                        payment.invoice.update_status_based_on_payments()
+                        if payment.status != 'COMPLETED':
+                            payment.status = 'COMPLETED'
+                            payment.save()
+                            payment.invoice.update_status_based_on_payments()
                 
                     return Response({"status": "success"}, status=status.HTTP_200_OK)
                 except Payment.DoesNotExist:
                     return Response({"detail": "Payment not found"}, status=status.HTTP_404_NOT_FOUND)
-            
     
         except Exception as e:
             logger.error(f"Error processing MonCash webhook: {str(e)}")

@@ -1,6 +1,6 @@
 
 from core.services.moncash.configuration import gateway
-from moncash.exceptions import  NotFoundError
+from moncash.exceptions import  NotFoundError, MoncashError, ServerError, ServiceUnavailableError
 
 
 
@@ -39,7 +39,18 @@ def verify_payment_by_transaction_id(request, transaction_id):
             "status": 'SUCCESS'
         }
         return json_data
-    except Exception as e:
+    except NotFoundError:
+        return {
+            "status": 'NOT_FOUND',
+            "message": 'Payment not found'
+        }
+    except MoncashError:
+        return {
+            "status": 'ERROR',
+            "message": 'Unable to verify payment'
+        }
+
+    except Exception:
         return {
             "status": 'ERROR',
             "message": 'Unable to verify payment'
